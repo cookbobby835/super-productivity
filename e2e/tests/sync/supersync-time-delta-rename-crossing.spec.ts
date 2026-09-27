@@ -1,0 +1,208 @@
+import { test, expect } from '../../fixtures/supersync.fixture';
+import {
+  createTestUser,
+  getSuperSyncConfig,
+  createSimulatedClient,
+  closeClient,
+  waitForTask,
+  recordTaskTimeDelta,
+  expectExactTaskTime,
+  renameTask,
+  getTaskTitleFromState,
+  type SimulatedE2EClient,
+} from '../../utils/supersync-helpers';
+import { waitForAppReady } from '../../utils/waits';
+
+/**
+ * #10214 follow-up. A pending task-time delta crossing a concurrent remote edit
+ * of the task's other fields (or a pending edit crossing a remote delta) is
+ * applied without a conflict, but the pending op keeps a vector clock that
+ * does not include the remote op. The server only lets two concurrent time
+ * deltas through, so it rejected the pending op; the client then re-downloaded
+ * the whole history from seq 0 and re-sent the task as an absolute LWW
+ * snapshot, which overwrote time a third device tracked concurrently.
+ */
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null;
+
+/** Only explicit syncs run, so every crossing happens in the stated order. */
+const blockBackgroundSync = async (client: SimulatedE2EClient): Promise<void> => {
+  await client.page.evaluate(() => {
+    const flags = globalThis as typeof globalThis & Record<string, boolean>;
+    flags['__SP_E2E_BLOCK_AUTO_SYNC'] = true;
+    flags['__SP_E2E_BLOCK_WS_DOWNLOAD'] = true;
+    flags['__SP_E2E_BLOCK_IMMEDIATE_UPLOAD'] = true;
+  });
+};
+
+/** Fail on the dataset conflict dialog or an error instead of resolving it. */
+const sync = async (client: SimulatedE2EClient): Promise<void> => {
+  const downloaded = client.page.waitForResponse(
+    (response) =>
+      response.url().includes('/api/sync/ops') && response.request().method() === 'GET',
+  );
+  await client.sync.clickSyncBtn();
+  expect((await downloaded).ok()).toBe(true);
+  const outcome = async (): Promise<string> => {
+    if (await client.sync.conflictDialog.isVisible()) return 'conflict-dialog';
+    if (await client.sync.hasSyncError()) return 'error';
+    const spinning = await client.sync.syncSpinner.isVisible();
+    const checked = await client.sync.syncCheckIcon
+      .filter({ hasText: /^done_all$/ })
+      .isVisible();
+    return !spinning && checked ? 'in-sync' : 'pending';
+  };
+  let observed = 'pending';
+  await expect
+    .poll(
+      async () => {
+        observed = await outcome();
+        return observed;
+      },
+      { timeout: 30000 },
+    )
+    .not.toBe('pending');
+  expect(observed).toBe('in-sync');
+};
+
+/** Full-history downloads: the rejection handler's `forceFromSeq0` retry. */
+const recordForcedDownloads = (clients: SimulatedE2EClient[]): string[] => {
+  const forced: string[] = [];
+  for (const client of clients) {
+    client.page.on('request', (request) => {
+      if (
+        request.method() === 'GET' &&
+        request.url().includes('/api/sync/ops?') &&
+        new URL(request.url()).searchParams.get('sinceSeq') === '0'
+      ) {
+        forced.push(client.clientName);
+      }
+    });
+  }
+  return forced;
+};
+
+const recordRejections = (clients: SimulatedE2EClient[]): string[] => {
+  const rejections: string[] = [];
+  for (const client of clients) {
+    client.page.on('response', async (response) => {
+      if (
+        response.request().method() !== 'POST' ||
+        !response.url().includes('/api/sync/ops')
+      ) {
+        return;
+      }
+      const body: unknown = await response.json().catch(() => null);
+      const results = isRecord(body) && Array.isArray(body.results) ? body.results : [];
+      for (const result of results) {
+        if (isRecord(result) && result.accepted === false) {
+          rejections.push(`${client.clientName}:${String(result.errorCode)}`);
+        }
+      }
+    });
+  }
+  return rejections;
+};
+
+test.describe('@supersync time delta crossing a concurrent task edit', () => {
+  // 'delta': A's pending delta crosses B's rename that reached the server first.
+  // 'rename': B's pending rename crosses A's delta that reached the server first.
+  // C tracks time concurrently in both, so an absolute re-send would lose time.
+  for (const pendingSide of ['delta', 'rename'] as const) {
+    test(`pending ${pendingSide} crossing keeps time additive without a full re-download`, async ({
+      browser,
+      baseURL,
+      testRunId,
+    }) => {
+      test.setTimeout(300000);
+
+      const taskDate = '2026-07-13';
+      const initialTime = 10000;
+      const deltaA = 3000;
+      const deltaC = 5000;
+      const expectedTime = initialTime + deltaA + deltaC;
+      const taskName = `DeltaCrossing-${pendingSide}-${Date.now()}`;
+      const renamedTitle = `${taskName}-Renamed`;
+      const clients: SimulatedE2EClient[] = [];
+
+      try {
+        const syncConfig = getSuperSyncConfig(await createTestUser(testRunId));
+        const clientA = await createSimulatedClient(browser, baseURL!, 'A', testRunId);
+        clients.push(clientA);
+        await clientA.sync.setupSuperSync(syncConfig);
+        await clientA.workView.addTask(taskName);
+        await waitForTask(clientA.page, taskName);
+        await recordTaskTimeDelta(clientA, taskName, taskDate, initialTime);
+        await clientA.sync.syncAndWait();
+
+        const clientB = await createSimulatedClient(browser, baseURL!, 'B', testRunId);
+        clients.push(clientB);
+        const clientC = await createSimulatedClient(browser, baseURL!, 'C', testRunId);
+        clients.push(clientC);
+        for (const client of [clientB, clientC]) {
+          await client.sync.setupSuperSync(syncConfig);
+          await client.sync.syncAndWait();
+          await waitForTask(client.page, taskName);
+          await expectExactTaskTime(client, taskName, initialTime);
+        }
+
+        for (const client of clients) {
+          await blockBackgroundSync(client);
+        }
+        const forcedDownloads = recordForcedDownloads(clients);
+        const rejections = recordRejections(clients);
+
+        if (pendingSide === 'delta') {
+          await recordTaskTimeDelta(clientA, taskName, taskDate, deltaA);
+          await recordTaskTimeDelta(clientC, taskName, taskDate, deltaC);
+          await renameTask(clientB, taskName, renamedTitle);
+          await sync(clientB);
+          await sync(clientA);
+        } else {
+          await renameTask(clientB, taskName, renamedTitle);
+          await recordTaskTimeDelta(clientC, taskName, taskDate, deltaC);
+          await recordTaskTimeDelta(clientA, taskName, taskDate, deltaA);
+          await sync(clientA);
+          await sync(clientB);
+        }
+        // C's pending delta crosses both the rename and A's delta.
+        await sync(clientC);
+        for (let round = 0; round < 2; round++) {
+          for (const client of clients) {
+            await sync(client);
+          }
+        }
+
+        const expectConverged = async (): Promise<void> => {
+          for (const client of clients) {
+            await expectExactTaskTime(client, taskName, expectedTime);
+            await expect
+              .poll(() => getTaskTitleFromState(client, taskName), { timeout: 30000 })
+              .toBe(renamedTitle);
+          }
+        };
+        await expectConverged();
+        expect(forcedDownloads).toEqual([]);
+
+        // Replay from the persisted op log must reach the same state: a
+        // re-appended copy of a delta would count the tracked time twice here.
+        for (const client of clients) {
+          await client.page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 });
+          await waitForAppReady(client.page);
+          await waitForTask(client.page, taskName);
+        }
+        await expectConverged();
+
+        test.info().annotations.push({
+          type: 'server rejections',
+          description: rejections.join(', ') || 'none',
+        });
+      } finally {
+        for (const client of clients) {
+          await closeClient(client);
+        }
+      }
+    });
+  }
+});
