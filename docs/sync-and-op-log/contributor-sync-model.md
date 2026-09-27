@@ -176,6 +176,47 @@ blessed pattern is a `task-shared-meta-reducers/` reducer.
 
 ---
 
+## Conflict resolution — stay on generic paths
+
+Operations are replayed intents, but conflicts are detected and resolved per
+**declared** entity. An action whose reducer writes more than it declares (a
+parent's list, a sibling, another entity type) has no automatic resolution. It
+either needs hand-written compensation in `ConflictResolutionService`, or a
+crossing edit hits the fail-closed stop (`UnsupportedMultiEntityConflictError`),
+which ends in the whole-dataset "Keep local / Keep remote" dialog. That class
+was the largest single source of sync fix code: 51 fixes, ~7.4k net production
+lines and ~23.9k test lines (measured 2026-09, see
+[the architecture review](../plans/2026-09-26-sync-architecture-review.md) §2.2).
+
+1. **Prefer a generic resolution path.** Route a conflict fix through an
+   existing generic mechanism instead of adding an action type to an allowlist
+   or a per-action branch. Examples: the causal recovery used for reorders
+   (`reorder-conflict.util.ts`, `superseded-operation-resolver.service.ts`),
+   the disjoint-field merge (`conflict-disjoint-merge.util.ts`), and derived
+   membership. Whatever the path, prove convergence and content preservation
+   in **both** conflict directions (local edit first and remote edit first)
+   with an E2E. Removing a safety stop is not a fix on its own. If no generic
+   path fits, design the smallest safe change, including what released clients
+   do with the ops you emit
+   ([ADR #8](../../ARCHITECTURE-DECISIONS.md#8-additive-data-model-evolution-over-schema-bumps)).
+   The resolver's `max-lines` cap in `eslint.config.js` only goes down.
+2. **Don't add denormalized lists or undeclared cross-entity writes.** Store
+   the fact on the child (`task.dueDay`, `task.parentId`, `note.projectId`) and
+   derive the list, as `TODAY_TAG` does
+   ([ADR #2](../../ARCHITECTURE-DECISIONS.md#2-today_tag-virtual-tag-pattern)).
+   A new list on a parent turns every child edit into a potential multi-entity
+   conflict. True multi-entity transitions still follow the atomicity rule
+   above.
+3. **No new crossing may reach the fail-closed stop.** A PR that adds a
+   multi-entity action, or changes what one writes, names the path that
+   resolves its conflicts with concurrent edits of every entity it declares,
+   and covers it with an E2E. The crossings known to stop today are pinned by
+   `src/app/op-log/testing/integration/reorder-conflict-wedge.integration.spec.ts`
+   and listed in
+   [the remaining-actions audit](../plans/2026-09-26-sync-remaining-conflict-actions-audit.md).
+
+---
+
 ## Clearing a field — `undefined` does not survive the wire (#9776)
 
 **Never rely on `changes: { someField: undefined }` reaching another device.**
