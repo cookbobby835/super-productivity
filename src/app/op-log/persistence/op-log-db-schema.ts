@@ -1,12 +1,10 @@
 /**
  * Declarative schema descriptor for the op-log database (`SUP_OPS`).
  *
- * Phase A of the SQLite migration (see docs/sync-and-op-log/sqlite-migration.md).
  * Replaces the imperative `runDbUpgrade()` (createObjectStore/createIndex calls)
- * with data that BOTH backends consume:
- * - the IndexedDB adapter turns each {@link DbStoreSchema} into object stores +
- *   indexes inside its `upgrade` callback;
- * - the SQLite adapter turns each into a `CREATE TABLE` + `CREATE INDEX`.
+ * with data: the IndexedDB adapter turns each {@link DbStoreSchema} into object
+ * stores + indexes inside its `upgrade` callback. (Written for the parked SQLite
+ * migration, see docs/sync-and-op-log/sqlite-migration.md.)
  *
  * This is the single source of truth for store structure; keep it in sync with
  * `db-keys.const.ts` (names) and `db-upgrade.ts` (until that is retired).

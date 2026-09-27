@@ -35,7 +35,6 @@ on:
     paths:
       - 'src/app/imex/sync/**'
       - 'src/app/op-log/**'
-      - 'src/app/pfapi/**'
       - 'src/app/root-store/**'
       - 'src/app/features/*/store/**'
       - 'src/app/features/tasks/task-attachment/**'

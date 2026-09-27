@@ -19,6 +19,10 @@ An older client can recreate its own journal database; a subsequent new-client
 startup requests its deletion again. A browser storage error leaves cleanup for
 another startup and is logged without failing bootstrap.
 
+Keep this cleanup indefinitely: v18.15.0 through v19.1.0 create
+`SUP_CONFLICT_JOURNAL` on every start, and without a desktop auto-updater users
+can upgrade from those releases at any time.
+
 This document keeps its historical filename so existing merge/composition links
 continue to resolve.
 

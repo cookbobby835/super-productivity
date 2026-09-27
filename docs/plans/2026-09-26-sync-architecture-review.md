@@ -13,6 +13,37 @@ away half of it?
 `packages/sync-providers`, `packages/shared-schema`, `packages/super-sync-server`,
 sync UI (`src/app/imex/sync/`), and the sync-facing meta-reducers.
 
+## Progress (2026-09-27)
+
+Landed on master; no release tag yet, but master auto-publishes to Play
+internal, Snap edge and `supersync:latest`:
+
+- **Phase 1 deletions:** pfapi JS and dead wrappers (#10274), store methods
+  and the SQLite park (#10277), snapshot merge (#10280), resolver wrappers
+  (#10284), conflict journal (#10287). About 2.0k of the ~2.3k unconditional
+  lines are gone; `listFiles` and three store methods remain.
+- **Bug 1 (#10264):** reorders no longer stop sync when they cross a note text
+  edit, habit count, board edit or section title (#10275, #10288, #10295,
+  #10294, #10298). Other crossings still stop sync; see
+  [the remaining-actions audit](2026-09-26-sync-remaining-conflict-actions-audit.md).
+- **Bug 2 (#10256):** fixed for current writers (#10270).
+- **v3:** explicit WebDAV v3 suite mode (#10283). The v3 default for new empty
+  folders (#10289) is being rolled back until its follow-ups land.
+- **Audits:** the [persistence audit](2026-09-26-sync-persistence-transaction-audit.md)
+  found 11 replace-state flows, does not recommend a `commitBaseline()`
+  primitive and gives no line estimate. The
+  [trigger audit](2026-09-26-sync-trigger-consolidation-audit.md) defers
+  merging the duplicate pipelines: ~380 candidate lines behind four gates,
+  replacing the ~550 estimate.
+- **Size:** `src/app/op-log/` went from 50,145 to 48,185 production lines and
+  `conflict-resolution.service.ts` from 4,817 to 4,581; its lint cap now
+  matches.
+
+Still open: Phase 0 rules; released-client E2Es in CI; `syncAndWait()`
+silently resolving the conflict dialog; one structural reorder rule instead
+of per-action admission; a fallback less destructive than whole-dataset
+replacement; publishing the v16 retirement notice.
+
 ## 1. Verdict
 
 **Short answer:** the architecture has one real design flaw. It is locked in
@@ -66,12 +97,12 @@ the evidence does not support throwing away half of the sync code.
      content convergence (Phase 2). The ordering-only allowlist alone is insufficient.
   3. Delete dead code: ~2.3k lines unconditionally; ~5–6k more after a
      decision each, four of them now made (Phase 1).
-  4. Consolidate local persistence, an estimated ~3–4k lines (parallel
-     track).
-- **Half?** No. Realistic: roughly 10–12k production lines over time — about
-  a fifth of the ~52k-line client op-log, some of it outside `op-log/`, plus a
-  larger share of tests. Most of it comes from deletions and consolidation,
-  not from a new model.
+  4. Consolidate local persistence (parallel track). The ~3–4k-line estimate
+     was withdrawn after the persistence audit; see Progress.
+- **Half?** No. Realistic: roughly 7–8k production lines from deletions, plus
+  whatever the persistence follow-ups remove — well under a fifth of the
+  ~52k-line client op-log, plus a larger share of tests. None of it comes from
+  a new model.
 
 ## 2. Evidence
 
@@ -563,7 +594,9 @@ Proposed for the maintainer to adopt or reject; this plan does not edit
     a high-risk state replacement.
 - **Duplicate WebSocket-download and immediate-upload pipelines (~550):**
   tasks 4–5 of `2026-07-13-sync-simplification-plan.md`, with that plan's
-  gates.
+  gates. Deferred by the
+  [trigger audit](2026-09-26-sync-trigger-consolidation-audit.md): ~380
+  candidate lines, not guaranteed net deletions, behind four gates.
 
 ### Phase 2 — Close the fail-closed surface locally (option E)
 
@@ -664,8 +697,11 @@ What it would take, so the decision can be made on facts:
 
 ### Parallel track — Persistence consolidation
 
-Independent of the conflict work. Estimated at ~3–4k lines by the persistence
-audit; not yet adversarially reviewed:
+Independent of the conflict work. Superseded by the
+[persistence audit](2026-09-26-sync-persistence-transaction-audit.md), which
+found 11 replace-state flows rather than six, does not recommend a
+`commitBaseline()` primitive and gives no line estimate. The original
+proposal, kept for reference:
 
 1. One `commitBaseline()` primitive (state, clock, applied-op ids and cursor in
    one transaction) for the six "replace the whole state" paths.

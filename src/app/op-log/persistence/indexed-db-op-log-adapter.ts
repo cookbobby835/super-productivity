@@ -1,6 +1,6 @@
 /**
- * IndexedDB implementation of {@link OpLogDbAdapter} (Phase A of the SQLite
- * migration — see docs/sync-and-op-log/sqlite-migration.md).
+ * IndexedDB implementation of {@link OpLogDbAdapter}, the only op-log backend
+ * (the SQLite one is parked — see docs/sync-and-op-log/sqlite-migration.md).
  *
  * A faithful wrapper of the behavior `OperationLogStoreService` /
  * `ArchiveStoreService` get from `idb` today: shared versioned upgrade,

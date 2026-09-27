@@ -1,10 +1,9 @@
 /**
  * Backend-agnostic persistence port for the op-log subsystem.
  *
- * Phase A of the SQLite migration (see docs/sync-and-op-log/sqlite-migration.md).
- * The op-log store currently talks to `idb` directly; this port lets the same
- * store run over either IndexedDB (web/PWA/Electron) or native SQLite
- * (Capacitor iOS/Android) without leaking either engine's semantics.
+ * Introduced for the SQLite migration, which is parked (see
+ * docs/sync-and-op-log/sqlite-migration.md). IndexedDB is the only backend on
+ * every platform; both op-log stores still talk to it through this port.
  *
  * Design constraints captured from the existing IndexedDB store:
  * - `ops` uses an auto-increment integer key (`seq`), a UNIQUE index on

@@ -37,13 +37,13 @@ completion marker, or platform feature flag. Device lifecycle and bridge
 behavior had not been validated.
 
 **Last commit containing the removed implementation:**
-[`9177c3afed6429934632b23de936cda8c6603fde`](https://github.com/super-productivity/super-productivity/tree/9177c3afed6429934632b23de936cda8c6603fde).
+[`8306d3adfc0fa2ad5feacb3aa6bb3e7be309161a`](https://github.com/super-productivity/super-productivity/tree/8306d3adfc0fa2ad5feacb3aa6bb3e7be309161a).
 The complete former plan and tests are preserved there. For example:
 
 ```bash
-git show 9177c3afed6429934632b23de936cda8c6603fde:src/app/op-log/persistence/sqlite-op-log-adapter.ts
-git show 9177c3afed6429934632b23de936cda8c6603fde:src/app/op-log/persistence/op-log-backend-migration.ts
-git show 9177c3afed6429934632b23de936cda8c6603fde:docs/sync-and-op-log/sqlite-migration.md
+git show 8306d3adfc0fa2ad5feacb3aa6bb3e7be309161a:src/app/op-log/persistence/sqlite-op-log-adapter.ts
+git show 8306d3adfc0fa2ad5feacb3aa6bb3e7be309161a:src/app/op-log/persistence/op-log-backend-migration.ts
+git show 8306d3adfc0fa2ad5feacb3aa6bb3e7be309161a:docs/sync-and-op-log/sqlite-migration.md
 ```
 
 ## Historical constraints if the decision is reopened
