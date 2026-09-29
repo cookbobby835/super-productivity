@@ -80,10 +80,11 @@ const persistent = (
   entityType: string,
   entityId: string,
   payload: Record<string, unknown>,
+  opType = 'CRT',
 ): Record<string, unknown> => ({
   type,
   ...payload,
-  meta: { isPersistent: true, entityType, entityId, opType: 'CRT' },
+  meta: { isPersistent: true, entityType, entityId, opType },
 });
 
 const readSlices = (
@@ -803,6 +804,147 @@ test('@supersync reorder rule: Today notes vs unpin keeps the stop, nothing lost
       expect(lists(await snapshot(a.page, crossing.list, ids))).toEqual(lists(reordered));
       expect(lists(await snapshot(b.page, crossing.list, ids))).toEqual(lists(edited));
       expect(pending(await rows(b.page))).toEqual([]);
+    },
+  );
+});
+
+// The causal proof is one retained, applied, synced remote row. Compaction can
+// remove it while the pin stays pending behind a lost upload. Without that proof
+// a pin keeps the whole-note snapshot fallback instead of stopping sync, whose
+// only way out replaces one side's data.
+test('@supersync reorder rule: project notes vs pin without causal proof keeps syncing', async ({
+  browser,
+  baseURL,
+  testRunId,
+}, testInfo) => {
+  test.setTimeout(300000);
+  const crossing: Crossing = { list: 'project notes', edit: 'pin' };
+  await withHarness(
+    { crossing },
+    testInfo.outputPath('evidence.json'),
+    async (harness) => {
+      const { a, b, ids, order, fullStateBefore } = await runCrossing(
+        { browser, baseURL, testRunId },
+        harness,
+        crossing,
+        false,
+        true,
+      );
+      let offline = false;
+      let allowUpload = false;
+      await a.page.route('**/api/sync/**', async (route) => {
+        if (offline || (!allowUpload && route.request().method() === 'POST'))
+          await route.abort();
+        else await route.continue();
+      });
+      await sync(b);
+      // A downloads and admits B's order, then loses its upload.
+      const blockedUpload = a.page.waitForRequest(
+        (request) =>
+          request.url().includes('/api/sync/ops') && request.method() === 'POST',
+      );
+      await a.sync.clickSyncBtn();
+      await blockedUpload;
+      await expect(a.sync.syncSpinner).toBeHidden();
+      const entries = await rows(a.page);
+      const pin = pending(entries).find((r) => r.op.a === 'NU')!;
+      const remote = entries.find((r) => r.op.id === order.id)!;
+      expect(remote.applicationStatus).toBe('applied');
+      const lists = ({ order: o, other, entities }: Snapshot): object => ({
+        order: o,
+        other,
+        entities,
+      });
+      const interrupted = lists(await snapshot(a.page, crossing.list, ids));
+
+      // Age only application metadata; the production compactor removes the row.
+      offline = true;
+      await a.page.evaluate(async (seq) => {
+        const db = await new Promise<IDBDatabase>((resolve, reject) => {
+          const r = indexedDB.open('SUP_OPS');
+          r.onsuccess = () => resolve(r.result);
+          r.onerror = () => reject(r.error);
+        });
+        try {
+          await new Promise<void>((resolve, reject) => {
+            const retentionAge = 8 * 24 * 60 * 60 * 1000;
+            const tx = db.transaction('ops', 'readwrite');
+            const r = tx.objectStore('ops').get(seq);
+            r.onsuccess = () =>
+              tx.objectStore('ops').put({
+                ...r.result,
+                appliedAt: Date.now() - retentionAge,
+              });
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+          });
+        } finally {
+          db.close();
+        }
+      }, remote.seq);
+      const taskId = entries.find(
+        (r) => r.source === 'local' && r.op.e === 'TASK' && r.op.o === 'CRT',
+      )!.op.d!;
+      await dispatch(
+        a.page,
+        Array.from({ length: 500 }, (_, i) =>
+          persistent(
+            '[Task Shared] updateTask',
+            'TASK',
+            taskId,
+            { task: { id: taskId, changes: { title: `Offline activity ${i}` } } },
+            'UPD',
+          ),
+        ),
+      );
+      await expect
+        .poll(async () => (await rows(a.page)).some((r) => r.op.id === order.id), {
+          timeout: 60000,
+        })
+        .toBe(false);
+      await a.page.reload();
+      await waitForAppReady(a.page, { ensureRoute: false });
+      expect(lists(await snapshot(a.page, crossing.list, ids))).toEqual(interrupted);
+
+      offline = false;
+      allowUpload = true;
+      const outcome = await syncOutcome(a);
+      harness.evidence.outcome = outcome;
+      if (outcome !== 'in-sync') await recordStop(a, harness);
+      expect(
+        outcome,
+        `a pin without causal proof must not stop sync: ${JSON.stringify(harness.evidence.safetyStop ?? [])}`,
+      ).toBe('in-sync');
+      await sync(a);
+      await sync(b);
+      await sync(a);
+
+      const finalA = await snapshot(a.page, crossing.list, ids);
+      const finalB = await snapshot(b.page, crossing.list, ids);
+      expect(finalA.entities[ids[0]].isPinnedToToday).toBe(true);
+      // Applying an LWW snapshot stamps the receiver's own `modified` by design
+      // (lwwUpdateMetaReducer); every other field must match.
+      const unstamped = (entities: Record<string, Entity>): Record<string, Entity> =>
+        Object.fromEntries(
+          Object.entries(entities).map(([id, entity]) => [
+            id,
+            { ...entity, modified: undefined },
+          ]),
+        );
+      expect(unstamped(finalB.entities)).toEqual(unstamped(finalA.entities));
+      expect(finalB.order).toEqual(finalA.order);
+      expect(
+        (await rows(a.page)).find((r) => r.op.id === pin.op.id)?.rejectedAt,
+      ).toBeDefined();
+      for (const client of [a, b]) {
+        const all = await rows(client.page);
+        expect(pending(all)).toEqual([]);
+        expect(fullStateOps(all).every((id) => fullStateBefore.has(id))).toBe(true);
+      }
+      // Known residual, as on master: the snapshot carries isPinnedToToday but
+      // not the Today list write, so B's Today list does not show the pin.
+      expect(finalA.other).toContain(ids[0]);
+      expect(finalB.other).not.toContain(ids[0]);
     },
   );
 });
