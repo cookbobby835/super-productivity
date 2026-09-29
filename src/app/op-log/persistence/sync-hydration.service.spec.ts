@@ -1071,6 +1071,7 @@ describe('SyncHydrationService', () => {
         syncProvider: SyncProviderId.WebDAV,
         syncInterval: 300000,
         isManualSyncOnly: true,
+        isUseSplitSyncFiles: false,
       };
       const remoteSync = {
         ...DEFAULT_GLOBAL_CONFIG.sync,
@@ -1079,6 +1080,7 @@ describe('SyncHydrationService', () => {
         syncProvider: SyncProviderId.Dropbox,
         syncInterval: 60000,
         isManualSyncOnly: false,
+        isUseSplitSyncFiles: true,
       };
       mockStore.select.and.returnValue(of(localSync));
 

@@ -58,7 +58,10 @@ import { mergeVectorClocks, compareVectorClocks } from '../../../core/util/vecto
 import { detectDownloadGap, isSnapshotBaseUnseen } from './file-based-sync-gap.util';
 import { ArchiveDbAdapter } from '../../../core/persistence/archive-db-adapter.service';
 import { StateSnapshotService } from '../../backup/state-snapshot.service';
-import { stripLocalOnlySyncSettingsFromAppData } from '../../../features/config/local-only-sync-settings.util';
+import {
+  markSplitSyncFilesInAppData,
+  stripLocalOnlySyncSettingsFromAppData,
+} from '../../../features/config/local-only-sync-settings.util';
 import { CompactOperation } from '../../persistence/compact/compact-operation.types';
 import {
   encodeOperation,
@@ -1878,7 +1881,7 @@ export class FileBasedSyncAdapterService {
       vectorClock,
       lastModified: Date.now(),
       clientId,
-      state,
+      state: markSplitSyncFilesInAppData(state),
       archiveYoung,
       archiveOld,
     };

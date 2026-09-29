@@ -786,8 +786,12 @@ interrupted-write and legacy-overwrite follow-ups land. Discovery ignores v16
 `__meta_` files; the v2/v3 readers still stop normal syncs with
 `LegacySyncFormatDetectedError`, and a confirmed force overwrite writes the
 empty-folder format. Saved `isUseSplitSyncFiles: false` keeps v2 behavior;
-`true` explicitly opts into migration. Provider errors never establish
-emptiness. Discovery is target-scoped, in memory, and does not persist a choice.
+`true` explicitly opts into migration. The choice is per device
+(`LOCAL_ONLY_SYNC_DEVICE_KEYS`): snapshots and other devices' config updates
+never change it. v3 state files carry `true` for 18.14–19.1 clients, which
+still apply a synced value and read a missing one as `false`. Provider errors
+never establish emptiness. Discovery is target-scoped, in memory, and does not
+persist a choice.
 
 The v3 migration is one-way for a sync folder. It leaves a v3 tombstone in the
 legacy `sync-data.json` location so clients that do not understand the split

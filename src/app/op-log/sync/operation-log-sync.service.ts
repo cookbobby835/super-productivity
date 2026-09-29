@@ -78,7 +78,7 @@ import { firstValueFrom } from 'rxjs';
 import { selectSyncConfig } from '../../features/config/store/global-config.reducer';
 import {
   applyLocalOnlySyncSettingsToAppData,
-  LocalOnlySyncSettings,
+  pickLocalOnlySyncSettings,
   stripLocalOnlySyncSettingsFromAppData,
 } from '../../features/config/local-only-sync-settings.util';
 import { DEFAULT_GLOBAL_CONFIG } from '../../features/config/default-global-config.const';
@@ -1865,13 +1865,7 @@ export class OperationLogSyncService {
     }
 
     const currentSyncConfig = await firstValueFrom(this.store.select(selectSyncConfig));
-    const localOnlySyncSettings: LocalOnlySyncSettings = {
-      isEnabled: currentSyncConfig.isEnabled,
-      isEncryptionEnabled: currentSyncConfig.isEncryptionEnabled,
-      syncProvider: currentSyncConfig.syncProvider,
-      syncInterval: currentSyncConfig.syncInterval,
-      isManualSyncOnly: currentSyncConfig.isManualSyncOnly,
-    };
+    const localOnlySyncSettings = pickLocalOnlySyncSettings(currentSyncConfig);
 
     let snapshotState = result.snapshotState as Record<string, unknown> | undefined;
     if (hasSnapshotState && snapshotState) {

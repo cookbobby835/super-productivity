@@ -1,3 +1,4 @@
+import { markSplitSyncFilesInAppData } from '../../../features/config/local-only-sync-settings.util';
 import {
   FileBasedStateFile,
   FileBasedSyncData,
@@ -16,7 +17,7 @@ export const buildSplitMigrationState = (
     vectorClock: legacy.vectorClock,
     lastModified: Date.now(),
     clientId,
-    state: legacy.state,
+    state: markSplitSyncFilesInAppData(legacy.state),
     archiveYoung: legacy.archiveYoung,
     archiveOld: legacy.archiveOld,
   };

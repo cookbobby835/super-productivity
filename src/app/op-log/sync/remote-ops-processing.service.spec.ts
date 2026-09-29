@@ -1404,6 +1404,7 @@ describe('RemoteOpsProcessingService', () => {
         syncProvider: SyncProviderId.WebDAV,
         syncInterval: 300000,
         isManualSyncOnly: true,
+        isUseSplitSyncFiles: false,
       };
       storeSpy.select.and.returnValue(of(localSync));
 
@@ -1420,6 +1421,7 @@ describe('RemoteOpsProcessingService', () => {
               syncProvider: SyncProviderId.Dropbox,
               syncInterval: 60000,
               isManualSyncOnly: false,
+              isUseSplitSyncFiles: true,
             },
           },
         },

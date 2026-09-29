@@ -1057,6 +1057,7 @@ describe('GlobalConfigReducer', () => {
         syncProvider: SyncProviderId.WebDAV,
         syncInterval: 300000,
         isManualSyncOnly: true,
+        isUseSplitSyncFiles: false,
       };
       const remoteSync = {
         isEnabled: false,
@@ -1064,6 +1065,7 @@ describe('GlobalConfigReducer', () => {
         syncProvider: SyncProviderId.Dropbox,
         syncInterval: 60000,
         isManualSyncOnly: false,
+        isUseSplitSyncFiles: true,
       };
       const oldState: GlobalConfigState = {
         ...initialGlobalConfigState,

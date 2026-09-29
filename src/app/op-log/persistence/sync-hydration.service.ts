@@ -20,6 +20,7 @@ import { ArchiveModel } from '../../features/time-tracking/time-tracking.model';
 import { normalizeGlobalConfigStartOfNextDay } from '../../features/config/normalize-start-of-next-day-config';
 import {
   applyLocalOnlySyncSettingsToAppData,
+  pickLocalOnlySyncSettings,
   stripLocalOnlySyncSettingsFromAppData,
 } from '../../features/config/local-only-sync-settings.util';
 import { LockService } from '../sync/lock.service';
@@ -103,13 +104,7 @@ export class SyncHydrationService {
       // FIX: isEnabled was not being preserved, causing sync to appear disabled after reload
       // when another client had sync disabled.
       const currentSyncConfig = await firstValueFrom(this.store.select(selectSyncConfig));
-      const localOnlySettings = {
-        isEnabled: currentSyncConfig.isEnabled,
-        isEncryptionEnabled: currentSyncConfig.isEncryptionEnabled,
-        syncProvider: currentSyncConfig.syncProvider,
-        syncInterval: currentSyncConfig.syncInterval,
-        isManualSyncOnly: currentSyncConfig.isManualSyncOnly,
-      };
+      const localOnlySettings = pickLocalOnlySyncSettings(currentSyncConfig);
 
       const typedDownloadedData = downloadedMainModelData as
         | Record<string, unknown>

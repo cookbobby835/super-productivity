@@ -165,6 +165,7 @@ export const globalConfigReducer = createReducer<GlobalConfigState>(
     // - isEncryptionEnabled: Encryption state must not be overwritten by imports
     // - syncInterval: Each client chooses its own automatic sync frequency
     // - isManualSyncOnly: Each client chooses automatic vs manual sync
+    // - isUseSplitSyncFiles: Each client chooses its own file sync format
     //
     // If oldState.sync.syncProvider is null, we're on first load (using initialGlobalConfigState)
     // and should use the incoming values (from snapshot). Otherwise, preserve local values.

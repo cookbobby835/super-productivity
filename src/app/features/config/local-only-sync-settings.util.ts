@@ -5,11 +5,12 @@ import { SyncConfig } from './global-config.model';
  *
  * - SCHEDULE keys (`syncInterval`, `isManualSyncOnly`): must NEVER leave the
  *   device. Stripped (`Omit`-style) at every upload boundary.
- * - DEVICE-IDENTITY keys (`syncProvider`, `isEnabled`, `isEncryptionEnabled`):
- *   exist on every device but the local value must win on hydration. On upload
- *   `syncProvider` is nulled (so a remote import never picks a provider for
- *   you); on hydration the local values are re-applied via
- *   {@link applyLocalOnlySyncSettingsToAppData}.
+ * - DEVICE-IDENTITY keys (`syncProvider`, `isEnabled`, `isEncryptionEnabled`,
+ *   `isUseSplitSyncFiles`): exist on every device but the local value must win
+ *   on hydration. On upload `syncProvider` is nulled (so a remote import never
+ *   picks a provider for you); on hydration the local values are re-applied via
+ *   {@link applyLocalOnlySyncSettingsToAppData}. Released 18.14–19.1 clients
+ *   still sync `isUseSplitSyncFiles`; see {@link markSplitSyncFilesInAppData}.
  *
  * The key arrays below are the single source of truth — both the
  * `LocalOnlySyncSettings` type and the reducer-side preservation helper
@@ -26,6 +27,7 @@ export const LOCAL_ONLY_SYNC_DEVICE_KEYS = [
   'syncProvider',
   'isEnabled',
   'isEncryptionEnabled',
+  'isUseSplitSyncFiles',
 ] as const satisfies readonly (keyof SyncConfig)[];
 
 export const LOCAL_ONLY_SYNC_KEYS = [
@@ -51,6 +53,17 @@ export const withLocalOnlySyncSettings = (
     merged[key] = localSyncConfig[key];
   }
   return merged as SyncConfig;
+};
+
+/** This device's values of every local-only key, e.g. to restore after a snapshot. */
+export const pickLocalOnlySyncSettings = (
+  syncConfig: SyncConfig,
+): LocalOnlySyncSettings => {
+  const picked: Record<string, unknown> = {};
+  for (const key of LOCAL_ONLY_SYNC_KEYS) {
+    picked[key] = syncConfig[key];
+  }
+  return picked as LocalOnlySyncSettings;
 };
 
 export const stripLocalOnlySyncScheduleSettings = <T extends Record<string, unknown>>(
@@ -123,3 +136,15 @@ export const applyLocalOnlySyncSettingsToAppData = <T>(
 export const stripLocalOnlySyncSettingsFromAppData = (data: unknown): unknown => {
   return _updateSyncConfigInAppData(data, _stripLocalOnlySyncSettings);
 };
+
+/**
+ * v3 state files carry `isUseSplitSyncFiles: true`. Released 18.14–19.1 clients
+ * still sync this choice and default a missing value to false, so hydrating a
+ * v3 snapshot without it would switch off the setting they needed to read the
+ * folder. Current clients keep their own value (it is a device key).
+ */
+export const markSplitSyncFilesInAppData = (data: unknown): unknown =>
+  _updateSyncConfigInAppData(data, (syncConfig) => ({
+    ...syncConfig,
+    isUseSplitSyncFiles: true,
+  }));

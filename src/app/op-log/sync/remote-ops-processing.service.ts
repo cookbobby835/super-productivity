@@ -33,7 +33,7 @@ import { RepairSyncContextService } from '../validation/repair-sync-context.serv
 import { selectSyncConfig } from '../../features/config/store/global-config.reducer';
 import {
   applyLocalOnlySyncSettingsToAppData,
-  LocalOnlySyncSettings,
+  pickLocalOnlySyncSettings,
 } from '../../features/config/local-only-sync-settings.util';
 import { HydrationStateService } from '../apply/hydration-state.service';
 import { SyncProviderManager } from '../sync-providers/provider-manager.service';
@@ -731,13 +731,7 @@ export class RemoteOpsProcessingService {
     }
 
     const currentSyncConfig = await firstValueFrom(this.store.select(selectSyncConfig));
-    const localOnlySettings: LocalOnlySyncSettings = {
-      isEnabled: currentSyncConfig.isEnabled,
-      isEncryptionEnabled: currentSyncConfig.isEncryptionEnabled,
-      syncProvider: currentSyncConfig.syncProvider,
-      syncInterval: currentSyncConfig.syncInterval,
-      isManualSyncOnly: currentSyncConfig.isManualSyncOnly,
-    };
+    const localOnlySettings = pickLocalOnlySyncSettings(currentSyncConfig);
 
     return ops.map((op) => {
       if (!this._isFullStateOperation(op)) {

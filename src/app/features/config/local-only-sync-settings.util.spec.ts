@@ -3,10 +3,13 @@ import {
   LOCAL_ONLY_SYNC_DEVICE_KEYS,
   LOCAL_ONLY_SYNC_KEYS,
   LOCAL_ONLY_SYNC_SCHEDULE_KEYS,
+  markSplitSyncFilesInAppData,
+  pickLocalOnlySyncSettings,
   stripLocalOnlySyncScheduleSettings,
   stripLocalOnlySyncSettingsFromAppData,
   stripLocalOnlySyncSettingsFromGlobalConfig,
 } from './local-only-sync-settings.util';
+import { DEFAULT_GLOBAL_CONFIG } from './default-global-config.const';
 import { SyncProviderId } from '../../op-log/sync-providers/provider.const';
 
 describe('local-only sync settings utils', () => {
@@ -113,5 +116,36 @@ describe('local-only sync settings utils', () => {
     expect(sync['syncInterval']).toBe(300000);
     expect(sync['isManualSyncOnly']).toBe(true);
     expect(sync['isCompressionEnabled']).toBe(true);
+  });
+
+  it('should pick every local-only key, including an absent Surgical sync choice', () => {
+    const picked = pickLocalOnlySyncSettings({
+      ...DEFAULT_GLOBAL_CONFIG.sync,
+      syncProvider: SyncProviderId.WebDAV,
+      isCompressionEnabled: true,
+    });
+
+    expect(Object.keys(picked).sort()).toEqual([...LOCAL_ONLY_SYNC_KEYS].sort());
+    expect(picked.syncProvider).toBe(SyncProviderId.WebDAV);
+    expect(picked.isUseSplitSyncFiles).toBeUndefined();
+  });
+
+  it('should mark v3 snapshot data as Surgical sync for released readers', () => {
+    for (const saved of [false, undefined]) {
+      const result = markSplitSyncFilesInAppData({
+        globalConfig: {
+          sync: { isUseSplitSyncFiles: saved, isCompressionEnabled: true },
+        },
+        task: { ids: [] },
+      }) as { globalConfig: { sync: Record<string, unknown> }; task: unknown };
+
+      expect(result.globalConfig.sync).toEqual({
+        isUseSplitSyncFiles: true,
+        isCompressionEnabled: true,
+      });
+      expect(result.task).toEqual({ ids: [] });
+    }
+    const withoutSync = { task: { ids: [] } };
+    expect(markSplitSyncFilesInAppData(withoutSync)).toBe(withoutSync);
   });
 });
