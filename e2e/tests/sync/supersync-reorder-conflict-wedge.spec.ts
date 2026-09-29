@@ -181,6 +181,19 @@ const snapshot = (
   );
 
 /** Fail on the safety dialog/error; do not replace either device's dataset. */
+/**
+ * setupSuperSync blocks automatic syncs on the current page only. After a reload
+ * the start-up sync, background triggers and immediate uploads would race the
+ * manual sync whose outcome a test asserts (a stop they hit shows as a snack).
+ */
+const keepSyncManual = (client: SimulatedE2EClient): Promise<void> =>
+  client.page.addInitScript(() => {
+    const flags = window as unknown as Record<string, unknown>;
+    flags.__SP_E2E_BLOCK_AUTO_SYNC = true;
+    flags.__SP_E2E_BLOCK_IMMEDIATE_UPLOAD = true;
+    flags.__SP_E2E_BLOCK_WS_DOWNLOAD = true;
+  });
+
 const sync = async (client: SimulatedE2EClient): Promise<void> => {
   const downloaded = client.page.waitForResponse(
     (response) =>
@@ -712,6 +725,7 @@ test.describe('@supersync reorder crossing content (#10264)', () => {
             const a = await createSimulatedClient(browser, baseURL!, 'A', testRunId);
             clients.push(a);
             await a.sync.setupSuperSync(config);
+            await keepSyncManual(a);
             if (datedHabit) {
               const dates = await habitDates(a.page);
               (data.seeds[0].simpleCounter as Record<string, unknown>).countOnDay = {
@@ -729,6 +743,7 @@ test.describe('@supersync reorder crossing content (#10264)', () => {
             const b = await createSimulatedClient(browser, baseURL!, 'B', testRunId);
             clients.push(b);
             await b.sync.setupSuperSync(config);
+            await keepSyncManual(b);
             await sync(b);
             const before = await snapshot(a.page, family, ids);
             const fullStatesBefore = datedHabit ? await fullStateOpCounts(clients) : [];
