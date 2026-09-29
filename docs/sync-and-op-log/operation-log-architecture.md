@@ -1078,7 +1078,13 @@ ops were refused, the other pending ops were captured after the upload started,
 and duplicates are marked synced before rejection handling. The applied row is
 the causal proof, so no seq-0 re-download is needed. A raised counter of an op
 the state cache covers is written into the cache clock too, because boot rebuilds
-the durable clock from that clock plus the op tail.
+the durable clock from that clock plus the op tail. Receivers apply the moved
+ops after any later op of the task the server already accepted from this client
+(next to a crossing delta it accepts this client's own delta and then each later
+op, which dominates it), so the move also requires the moved ops to commute with
+those (`isDisjointMergeEligible`). Otherwise the snapshot path runs instead: a
+moved first rename would win over an accepted second rename on every other
+device.
 
 ### Archive-Wins Rule
 

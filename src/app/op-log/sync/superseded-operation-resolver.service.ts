@@ -49,7 +49,10 @@ import {
   ReorderReplaySnapshot,
 } from './reorder-conflict.util';
 import { UnsupportedMultiEntityConflictError } from '../core/errors/sync-errors';
-import { isCommutingTimeDeltaCrossing } from './conflict-disjoint-merge.util';
+import {
+  isCommutingTimeDeltaCrossing,
+  isDisjointMergeEligible,
+} from './conflict-disjoint-merge.util';
 import { getPayloadKey } from '../core/entity-registry';
 
 type SupersededOperation = {
@@ -327,19 +330,41 @@ export class SupersededOperationResolverService {
       }
       // A pending op concurrent with an applied row was captured before that
       // row was appended, so only the tail after the oldest one can hold it.
-      const context = buildSectionCausalReplayContext(
-        await this.opLogStore.getOpsAfterSeq(pendingEntries[0].seq),
-      );
+      const tail = await this.opLogStore.getOpsAfterSeq(pendingEntries[0].seq);
+      const context = buildSectionCausalReplayContext(tail);
+      const payloadKey = getPayloadKey('TASK') ?? 'task';
       for (const [taskId, items] of rejectedByTask) {
         // Seq order; every pending op of the task moves so their clocks keep it.
-        const pendingOps = pendingEntries
-          .filter(({ op }) => getOpEntityIds(op).includes(taskId))
+        const taskEntries = pendingEntries.filter(({ op }) =>
+          getOpEntityIds(op).includes(taskId),
+        );
+        const pendingOps = taskEntries.map(({ op }) => op);
+        // The server may already hold later ops of the task from this client:
+        // against a crossing delta it accepts this client's own delta and each
+        // op dominating it. Receivers apply the moved ops after those, so they
+        // must commute, or a second rename would lose to the first everywhere.
+        const acceptedLaterOps = tail
+          .filter(
+            ({ seq, op, source, syncedAt }) =>
+              source === 'local' &&
+              syncedAt !== undefined &&
+              seq > (taskEntries[0]?.seq ?? Infinity) &&
+              op.entityType === 'TASK' &&
+              getOpEntityIds(op).includes(taskId),
+          )
           .map(({ op }) => op);
         let clockToDominate: VectorClock = {};
         const isProven =
           pendingOps.every(
             (op) => op.clientId === clientId && getOpEntityIds(op).length === 1,
           ) &&
+          (acceptedLaterOps.length === 0 ||
+            isDisjointMergeEligible({
+              localOps: pendingOps,
+              remoteOps: acceptedLaterOps,
+              payloadKey,
+              entityId: taskId,
+            })) &&
           items.every((item) => {
             const row = this._findAppliedConflictRow(item, context);
             if (!row) return false;
@@ -354,7 +379,7 @@ export class SupersededOperationResolverService {
               isCommutingTimeDeltaCrossing({
                 localOps: crossing,
                 remoteOps: [row.op],
-                payloadKey: getPayloadKey('TASK') ?? 'task',
+                payloadKey,
                 entityId: taskId,
               })
             );
