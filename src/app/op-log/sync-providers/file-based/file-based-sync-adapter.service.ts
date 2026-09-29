@@ -34,6 +34,7 @@ import {
   discoverFileSyncFormat,
   downloadLegacySyncFile,
   annotatePrimaryRev,
+  EMPTY_FOLDER_SYNC_FORMAT,
 } from './file-based-sync-format';
 import { assertSyncFileVersion } from './assert-sync-file-version';
 import { OpLog } from '../../../core/log';
@@ -1529,9 +1530,7 @@ export class FileBasedSyncAdapterService {
   // SPLIT-FILE ("SURGICAL SYNC") FORMAT
   // ═══════════════════════════════════════════════════════════════════════════
 
-  /**
-   * Whether the user explicitly requested v3, including migration of existing v2.
-   */
+  /** Whether the user explicitly requested v3, including migration of existing v2. */
   private _isSplitSyncEnabled(): boolean {
     const svc = this._injector.get(GlobalConfigService, null);
     return svc?.sync()?.isUseSplitSyncFiles === true;
@@ -1553,7 +1552,7 @@ export class FileBasedSyncAdapterService {
     this._abortDownloadIfTargetChanged(generation, key);
     // Never remember emptiness: a different client may create v2 before upload.
     if (format !== 'empty') this._remoteFormats.set(key, format);
-    return format !== 'v2';
+    return (format === 'empty' ? EMPTY_FOLDER_SYNC_FORMAT : format) === 'v3';
   }
 
   private _isPendingSplitMigration(data: FileBasedOpsFile): boolean {
@@ -1689,7 +1688,7 @@ export class FileBasedSyncAdapterService {
    * collision is astronomically unlikely and self-heals anyway: the reader
    * validates loaded content against `snapshotRef` (clock EQUAL), so a wrong
    * file fails validation and falls back to `sync-state.json`/`.bak`. `syncVersion`
-   * stays in the name for legible ordering and a future `listFiles`-prune.
+   * stays in the name for legible ordering and a future prune of leaked snapshots.
    */
   private _genStateFileName(syncVersion: number): string {
     const bytes = new Uint8Array(8);
@@ -1709,9 +1708,9 @@ export class FileBasedSyncAdapterService {
    *
    * Residual: a crash between the snapshot write and either commit or this cleanup
    * still leaks (rare crash window). Upgrade path if it ever matters — an
-   * opportunistic `listFiles` prune of `STATE_GEN_FILE_PREFIX` files with a stale
-   * syncVersion (listFiles is optional on the provider interface, so it must stay
-   * capability-gated).
+   * opportunistic prune of `STATE_GEN_FILE_PREFIX` files with a stale syncVersion.
+   * That would first need a listing capability, which the providers no longer
+   * expose (the removed `listFiles` is restorable from git history).
    */
   private async _removeGenStateFile(
     provider: GuardedFileSyncProvider,

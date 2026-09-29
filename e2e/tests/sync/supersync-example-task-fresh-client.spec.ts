@@ -78,9 +78,14 @@ test.describe('@supersync Fresh-client example tasks vs incoming import (#7976)'
         waitUntil: 'domcontentloaded',
         timeout: 30000,
       });
-      for (const exampleTitle of EXAMPLE_TASK_TITLES) {
-        await waitForTask(freshClient.page, exampleTitle);
-      }
+      // Same read and exact titles as the check after the import (waitForTask matches
+      // substrings), so that check cannot pass vacuously if a title drifts from
+      // EXAMPLE_TASK_TITLES.
+      await expect
+        .poll(() => getTaskTitles(freshClient!), {
+          message: 'INBOX should list all four example tasks before sync is configured',
+        })
+        .toEqual(expect.arrayContaining(EXAMPLE_TASK_TITLES));
 
       // Configure sync but do NOT let setup auto-resolve the conflict dialog
       // (waitForInitialSync:true would click "Use Server Data" and hide the bug).
