@@ -5227,5 +5227,122 @@ describe('FileBasedSyncAdapterService', () => {
 
       expect(res.success).toBe(false);
     });
+
+    // A folder move or a re-seed CREATES a split folder through uploadSnapshot.
+    // Like the ops path (_maybeMigrateLegacyToSplit), creation must claim
+    // sync-data.json before publishing anything: released v2 clients never look
+    // at sync-ops.json while sync-data.json is missing.
+    describe('split folder creation through the snapshot path', () => {
+      let files: Map<string, string>;
+      let revs: Map<string, string>;
+      let writes: Array<{ path: string; revToMatch: string | null; isForce: boolean }>;
+      let beforeFirstWrite: (() => void) | undefined;
+      let revCounter: number;
+
+      const put = (path: string, dataStr: string): string => {
+        const rev = `${path}-rev-${++revCounter}`;
+        files.set(path, dataStr);
+        revs.set(path, rev);
+        return rev;
+      };
+
+      const seedFolder = (): Promise<string> =>
+        adapter.uploadSnapshot!(
+          { tasks: [] },
+          'client1',
+          'initial',
+          { client1: 5 },
+          1,
+          false,
+          'import-op',
+          false,
+          'SYNC_IMPORT',
+          'SERVER_MIGRATION',
+        ).then(
+          (result) => (result.accepted ? 'accepted' : 'not accepted'),
+          () => 'not accepted',
+        );
+
+      beforeEach(() => {
+        files = new Map();
+        revs = new Map();
+        writes = [];
+        beforeFirstWrite = undefined;
+        revCounter = 0;
+        mockProvider.downloadFile.and.callFake(async (path: string) => {
+          const dataStr = files.get(path);
+          if (dataStr === undefined) throw new RemoteFileNotFoundAPIError(path);
+          return { dataStr, rev: revs.get(path)! };
+        });
+        mockProvider.getFileRev.and.callFake(async (path: string) => {
+          if (!files.has(path)) throw new RemoteFileNotFoundAPIError(path);
+          return { rev: revs.get(path)! };
+        });
+        // Compare-and-swap provider: null expects absence, a rev expects that rev.
+        mockProvider.uploadFile.and.callFake(
+          async (
+            path: string,
+            dataStr: string,
+            revToMatch: string | null,
+            isForceOverwrite?: boolean,
+          ) => {
+            writes.push({ path, revToMatch, isForce: !!isForceOverwrite });
+            const hook = beforeFirstWrite;
+            beforeFirstWrite = undefined;
+            hook?.();
+            if (!isForceOverwrite && (revs.get(path) ?? null) !== revToMatch) {
+              throw new UploadRevToMatchMismatchAPIError(path);
+            }
+            return { rev: put(path, dataStr) };
+          },
+        );
+      });
+
+      it('claims sync-data.json with a create-only write before publishing split files', async () => {
+        expect(await seedFolder()).toBe('accepted');
+
+        expect(writes[0]).toEqual({
+          path: C.SYNC_FILE,
+          revToMatch: null,
+          isForce: false,
+        });
+        expect(parseWithPrefix(files.get(C.SYNC_FILE)!)).toEqual(
+          jasmine.objectContaining({ version: 3, format: 'split' }),
+        );
+        expect(parseWithPrefix(files.get(C.OPS_FILE)!).version).toBe(3);
+      });
+
+      it('publishes nothing when a v2 client creates sync-data.json first', async () => {
+        const acknowledgedV2 = addPrefix(
+          createMockSyncData({ clientId: 'v2-client', vectorClock: { 'v2-client': 1 } }),
+        );
+        // The v2 client commits after this client's emptiness checks, just before
+        // its first write, and has already been told its upload succeeded.
+        beforeFirstWrite = () => put(C.SYNC_FILE, acknowledgedV2);
+
+        expect(await seedFolder()).toBe('not accepted');
+
+        expect(files.get(C.SYNC_FILE)).toBe(acknowledgedV2);
+        expect([...files.keys()]).toEqual([C.SYNC_FILE]);
+      });
+
+      it('does not create v3 over a v2 file when v3 was only discovered', async () => {
+        splitSyncEnabled = undefined;
+        put(C.OPS_FILE, addPrefix(makeOpsFile(), 3));
+        await adapter.downloadOps(1, 'client1');
+        // The discovered v3 folder is emptied and a v2 client recreates it before
+        // this client's full-state re-seed.
+        files.clear();
+        revs.clear();
+        const v2 = addPrefix(createMockSyncData({ clientId: 'v2-client' }));
+        put(C.SYNC_FILE, v2);
+
+        expect(await seedFolder()).toBe('not accepted');
+
+        expect(files.get(C.SYNC_FILE)).toBe(v2);
+        expect(files.has(C.OPS_FILE)).toBeFalse();
+        expect(files.has(C.STATE_FILE)).toBeFalse();
+      });
+    });
   });
 });
