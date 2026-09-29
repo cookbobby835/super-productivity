@@ -8,10 +8,12 @@ import {
   recordTaskTimeDelta,
   expectExactTaskTime,
   renameTask,
+  getTaskElement,
   getTaskTitleFromState,
   type SimulatedE2EClient,
 } from '../../utils/supersync-helpers';
 import { waitForAppReady } from '../../utils/waits';
+import { TagPage } from '../../pages/tag.page';
 
 /**
  * #10214 follow-up. A pending task-time delta crossing a concurrent remote edit
@@ -81,6 +83,108 @@ const recordForcedDownloads = (clients: SimulatedE2EClient[]): string[] => {
     });
   }
   return forced;
+};
+
+/** Full-state uploads, e.g. a REPAIR of state a receiver found invalid. */
+const recordFullStateUploads = (clients: SimulatedE2EClient[]): string[] => {
+  const uploads: string[] = [];
+  for (const client of clients) {
+    client.page.on('request', (request) => {
+      if (request.method() === 'POST' && request.url().includes('/api/sync/snapshot')) {
+        uploads.push(client.clientName);
+      }
+    });
+  }
+  return uploads;
+};
+
+type TaskStep =
+  | { kind: 'read' }
+  | { kind: 'dueDay'; day: string }
+  | { kind: 'plannerMove'; prevDay: string; newDay: string };
+
+/**
+ * Dispatches one real persistent action on the task through the store, or
+ * only reads it, and returns the task's tag and planning fields afterwards.
+ */
+const onTask = async (
+  client: SimulatedE2EClient,
+  taskName: string,
+  step: TaskStep,
+): Promise<{ tagIds: string[]; dueDay: string | null }> =>
+  client.page.evaluate(
+    async ({ name, taskStep }) => {
+      type Subscription = { unsubscribe: () => void };
+      type StoreLike = {
+        subscribe: (next: (state: unknown) => void) => Subscription;
+        dispatch: (action: unknown) => void;
+      };
+      const store = (window as unknown as { __e2eTestHelpers?: { store?: StoreLike } })
+        .__e2eTestHelpers?.store;
+      if (!store) {
+        throw new Error('E2E store helper is unavailable');
+      }
+      const readTask = (): Promise<Record<string, unknown>> =>
+        new Promise((resolve, reject) => {
+          const ref: { current?: Subscription } = {};
+          ref.current = store.subscribe((state) => {
+            window.setTimeout(() => ref.current?.unsubscribe());
+            const root = state as Record<string, { entities?: Record<string, unknown> }>;
+            const entities = (root.tasks ?? root.task)?.entities ?? {};
+            const task = Object.values(entities).find(
+              (value) =>
+                typeof value === 'object' &&
+                value !== null &&
+                String((value as Record<string, unknown>).title).includes(name),
+            );
+            if (task) {
+              resolve(task as Record<string, unknown>);
+            } else {
+              reject(new Error(`Task not found: ${name}`));
+            }
+          });
+        });
+      const task = await readTask();
+      const meta = (entityType: string, opType: string): Record<string, unknown> => ({
+        isPersistent: true,
+        entityType,
+        entityId: task.id,
+        opType,
+      });
+      if (taskStep.kind === 'dueDay') {
+        store.dispatch({
+          type: '[Task Shared] updateTask',
+          task: { id: task.id, changes: { dueDay: taskStep.day } },
+          meta: meta('TASK', 'UPD'),
+        });
+      } else if (taskStep.kind === 'plannerMove') {
+        const now = new Date();
+        const pad = (value: number): string => String(value).padStart(2, '0');
+        store.dispatch({
+          type: '[Planner] Transfer Task',
+          task,
+          prevDay: taskStep.prevDay,
+          newDay: taskStep.newDay,
+          targetIndex: 0,
+          today: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`,
+          meta: meta('PLANNER', 'MOV'),
+        });
+      }
+      const current = await readTask();
+      return {
+        tagIds: [...((current.tagIds as string[] | undefined) ?? [])],
+        dueDay: (current.dueDay as string | undefined) ?? null,
+      };
+    },
+    { name: taskName, taskStep: step },
+  );
+
+/** A local calendar day `offset` days from today, as the app stores it. */
+const dayFromToday = (offset: number): string => {
+  const day = new Date();
+  day.setDate(day.getDate() + offset);
+  const pad = (value: number): string => String(value).padStart(2, '0');
+  return `${day.getFullYear()}-${pad(day.getMonth() + 1)}-${pad(day.getDate())}`;
 };
 
 const recordRejections = (clients: SimulatedE2EClient[]): string[] => {
@@ -340,4 +444,102 @@ test.describe('@supersync time delta crossing a concurrent task edit', () => {
       }
     }
   });
+
+  // Ops of other entity types also write task fields, unseen by the task-level
+  // checks: deleting a tag rewrites `tagIds`, a planner move rewrites `dueDay`.
+  // A rejected task op moved past this device's own later such op lands after
+  // it on every receiver: a deleted tag comes back, an old day wins.
+  for (const crossEntityWrite of ['tag deletion', 'planner move'] as const) {
+    test(`a rejected task op is not moved past this device's ${crossEntityWrite}`, async ({
+      browser,
+      baseURL,
+      testRunId,
+    }) => {
+      test.setTimeout(300000);
+
+      const taskDate = '2026-07-13';
+      const taskName = `DeltaCrossingCascade-${Date.now()}`;
+      const tagName = `CascadeTag-${Date.now()}`;
+      const [firstDay, secondDay] = [dayFromToday(2), dayFromToday(3)];
+      const clients: SimulatedE2EClient[] = [];
+
+      try {
+        const syncConfig = getSuperSyncConfig(await createTestUser(testRunId));
+        const clientA = await createSimulatedClient(browser, baseURL!, 'A', testRunId);
+        clients.push(clientA);
+        await clientA.sync.setupSuperSync(syncConfig);
+        await clientA.workView.addTask(taskName);
+        await waitForTask(clientA.page, taskName);
+        await recordTaskTimeDelta(clientA, taskName, taskDate, 10000);
+        const tagPageA = new TagPage(clientA.page);
+        if (crossEntityWrite === 'tag deletion') {
+          await tagPageA.createTag(tagName);
+        }
+        await clientA.sync.syncAndWait();
+
+        const clientB = await createSimulatedClient(browser, baseURL!, 'B', testRunId);
+        clients.push(clientB);
+        await clientB.sync.setupSuperSync(syncConfig);
+        await clientB.sync.syncAndWait();
+        await waitForTask(clientB.page, taskName);
+        await expectExactTaskTime(clientB, taskName, 10000);
+        for (const client of clients) {
+          await blockBackgroundSync(client);
+        }
+        const rejections = recordRejections(clients);
+        const fullStateUploads = recordFullStateUploads(clients);
+
+        // A, before syncing: a field write other entity types also write, time,
+        // then its own later write of that field through such an entity type.
+        if (crossEntityWrite === 'tag deletion') {
+          await tagPageA.assignTagToTask(
+            getTaskElement(clientA, taskName).first(),
+            tagName,
+          );
+          await recordTaskTimeDelta(clientA, taskName, taskDate, 3000);
+          await tagPageA.deleteTag(tagName);
+        } else {
+          await onTask(clientA, taskName, { kind: 'dueDay', day: firstDay });
+          await recordTaskTimeDelta(clientA, taskName, taskDate, 3000);
+          await onTask(clientA, taskName, {
+            kind: 'plannerMove',
+            prevDay: firstDay,
+            newDay: secondDay,
+          });
+        }
+        const expected = await onTask(clientA, taskName, { kind: 'read' });
+        if (crossEntityWrite === 'tag deletion') {
+          expect(expected.tagIds).toEqual([]);
+        } else {
+          expect(expected.dueDay).toBe(secondDay);
+        }
+        // B's rename reaches the server first, so A's task ops are rejected.
+        await renameTask(clientB, taskName, `${taskName}-Renamed`);
+        await sync(clientB);
+        await sync(clientA);
+        expect(rejections).toContain('A:CONFLICT_CONCURRENT');
+        for (let round = 0; round < 2; round++) {
+          for (const client of clients) {
+            await sync(client);
+          }
+        }
+
+        for (const client of clients) {
+          await expect
+            .poll(() => onTask(client, taskName, { kind: 'read' }), { timeout: 30000 })
+            .toEqual(expected);
+          await expectExactTaskTime(client, taskName, 13000);
+          await expect
+            .poll(() => getTaskTitleFromState(client, taskName), { timeout: 30000 })
+            .toBe(`${taskName}-Renamed`);
+        }
+        // No receiver had to repair state it found invalid (a revived deleted tag).
+        expect(fullStateUploads).toEqual([]);
+      } finally {
+        for (const client of clients) {
+          await closeClient(client);
+        }
+      }
+    });
+  }
 });
