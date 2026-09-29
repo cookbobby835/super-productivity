@@ -4,8 +4,10 @@ import { SyncProviderId } from '../provider.const';
 import {
   FileSyncProvider,
   OperationSyncCapable,
+  SnapshotUploadResponse,
   SyncOperation,
 } from '../provider.interface';
+import { isRetryableUploadError } from '@sp/sync-providers/http';
 import {
   FILE_BASED_SYNC_CONSTANTS,
   FileBasedSyncData,
@@ -5171,7 +5173,12 @@ describe('FileBasedSyncAdapterService', () => {
       // upload. sync-state.json.bak is deliberately NOT refreshed — its adoption
       // is ref-validated (EQUAL clock vs snapshotRef), so a stale copy is inert,
       // and it must keep serving the compaction crash window it was made for.
+      // Replaces an existing split folder; creating one is covered below.
       routeDownloads({});
+      mockProvider.getFileRev.and.callFake(async (path: string) => {
+        if (path === C.OPS_FILE) return { rev: 'ops-rev' };
+        throw new RemoteFileNotFoundAPIError(path);
+      });
 
       await adapter.uploadSnapshot(
         {},
@@ -5246,7 +5253,7 @@ describe('FileBasedSyncAdapterService', () => {
         return rev;
       };
 
-      const seedFolder = (): Promise<string> =>
+      const uploadSeed = (): Promise<SnapshotUploadResponse> =>
         adapter.uploadSnapshot!(
           { tasks: [] },
           'client1',
@@ -5258,7 +5265,9 @@ describe('FileBasedSyncAdapterService', () => {
           false,
           'SYNC_IMPORT',
           'SERVER_MIGRATION',
-        ).then(
+        );
+      const seedFolder = (): Promise<string> =>
+        uploadSeed().then(
           (result) => (result.accepted ? 'accepted' : 'not accepted'),
           () => 'not accepted',
         );
@@ -5327,6 +5336,33 @@ describe('FileBasedSyncAdapterService', () => {
 
         expect(files.get(C.SYNC_FILE)).toBe(acknowledgedV2);
         expect([...files.keys()]).toEqual([C.SYNC_FILE]);
+      });
+
+      it('keeps a seed that lost the race pending for the next sync', async () => {
+        beforeFirstWrite = () =>
+          put(C.SYNC_FILE, addPrefix(createMockSyncData({ clientId: 'v2Client' })));
+
+        const result = await uploadSeed();
+
+        // A permanent rejection would block every later server-migration snapshot.
+        expect(result.accepted).toBeFalse();
+        expect(isRetryableUploadError(result.error)).toBeTrue();
+      });
+
+      it('still claims sync-data.json when an overwrite replaces a v16 folder', async () => {
+        put(C.LEGACY_META_FILE, '{"lastUpdate":1}');
+
+        expect(await seedFolder()).toBe('accepted');
+
+        expect(writes[0]).toEqual({
+          path: C.SYNC_FILE,
+          revToMatch: null,
+          isForce: false,
+        });
+        const ops = parseWithPrefix(
+          files.get(C.OPS_FILE)!,
+        ) as unknown as FileBasedOpsFile;
+        expect(ops.version).toBe(3);
       });
 
       it('does not create v3 over a v2 file when v3 was only discovered', async () => {

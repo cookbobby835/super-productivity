@@ -791,7 +791,10 @@ emptiness. Discovery is target-scoped, in memory, and does not persist a choice.
 
 The v3 migration is one-way for a sync folder. It leaves a v3 tombstone in the
 legacy `sync-data.json` location so clients that do not understand the split
-format stop instead of recreating an independent v2 history.
+format stop instead of recreating an independent v2 history. Creating a v3
+folder, by an ops upload or a snapshot, writes that tombstone first with a
+create-only write. If a v2 client created `sync-data.json` first, that write
+fails instead of overwriting it, and the v3 client retries on the next sync.
 
 ## B.2 Bootstrap, Incremental Catch-up, and Gaps
 

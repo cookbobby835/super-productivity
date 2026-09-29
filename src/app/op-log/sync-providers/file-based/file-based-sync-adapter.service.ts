@@ -47,6 +47,7 @@ import {
   FileSyncTargetChangedError,
   InvalidDataSPError,
   JsonParseError,
+  LegacySyncFormatDetectedError,
   PlaintextWhenEncryptionExpectedError,
   RemoteFileNotFoundAPIError,
   SplitSyncFormatDetectedError,
@@ -2728,8 +2729,9 @@ export class FileBasedSyncAdapterService {
   /**
    * Split-format snapshot upload (force-upload / "Use Local" / recovery). Writes
    * `sync-state.json` FIRST, then a fresh `sync-ops.json` (empty recentOps,
-   * snapshotRef pointing at the just-written snapshot), then a tombstone over
-   * `sync-data.json` so OFF clients don't diverge.
+   * snapshotRef pointing at the just-written snapshot). Replacing a split folder
+   * then force-writes a tombstone over `sync-data.json` so OFF clients don't
+   * diverge; creating one claims `sync-data.json` before publishing anything.
    */
   private async _uploadSnapshotSplit(
     provider: GuardedFileSyncProvider,
@@ -2745,88 +2747,136 @@ export class FileBasedSyncAdapterService {
     const newSyncVersion = 1;
     const clock = vectorClock as VectorClock;
 
+    // `getFileRev` reads metadata only — no decode — so a torn/undecryptable
+    // remote does not block the snapshot. Missing ops file → this creates the folder.
+    let remoteOpsRev: string | null = null;
+    try {
+      remoteOpsRev = (await provider.getFileRev(FILE_BASED_SYNC_CONSTANTS.OPS_FILE, null))
+        .rev;
+    } catch (e) {
+      if (!(e instanceof RemoteFileNotFoundAPIError)) {
+        throw e;
+      }
+    }
     // #9023: same concurrency guard as the single-file path — a REPAIR recovery
     // snapshot must not overwrite a remote that advanced since our last sync.
     // The commit-point sync-ops.json is what other clients read, so gate on ITS
     // rev vs the rev we last downloaded+applied (`_lastSeenRevs`). A rev, not a
-    // vector clock, is used deliberately (see _uploadSnapshot). `getFileRev`
-    // reads metadata only — no decode — so a torn/undecryptable remote does not
-    // block the repair. Missing ops file → no history to clobber, safe.
+    // vector clock, is used deliberately (see _uploadSnapshot).
     // NOTE: this pre-check closes the concurrent *merge* window; a conditional
     // (rev-matched) write across the two-file (state + ops) protocol to close the
     // residual sub-second check→write race is tracked as a follow-up.
-    if (snapshotOpType === 'REPAIR') {
-      const baseRev = this._lastSeenRevs.get(providerKey) ?? null;
-      let remoteOpsRev: string | null = null;
-      try {
-        remoteOpsRev = (
-          await provider.getFileRev(FILE_BASED_SYNC_CONSTANTS.OPS_FILE, null)
-        ).rev;
-      } catch (e) {
-        if (!(e instanceof RemoteFileNotFoundAPIError)) {
-          throw e;
-        }
-      }
-      if (remoteOpsRev !== null && remoteOpsRev !== baseRev) {
-        OpLog.warn(
-          'FileBasedSyncAdapter: REPAIR split snapshot is stale (remote advanced ' +
-            'since our last sync); requesting rebase instead of overwriting.',
-        );
-        return {
-          accepted: false,
-          error: 'REPAIR snapshot does not include current remote state',
-          errorCode: REPAIR_STALE_ERROR_CODE,
-        };
-      }
+    if (
+      snapshotOpType === 'REPAIR' &&
+      remoteOpsRev !== null &&
+      remoteOpsRev !== (this._lastSeenRevs.get(providerKey) ?? null)
+    ) {
+      OpLog.warn(
+        'FileBasedSyncAdapter: REPAIR split snapshot is stale (remote advanced ' +
+          'since our last sync); requesting rebase instead of overwriting.',
+      );
+      return {
+        accepted: false,
+        error: 'REPAIR snapshot does not include current remote state',
+        errorCode: REPAIR_STALE_ERROR_CODE,
+      };
     }
 
-    const stateData = await this._buildStateFileData(
-      clientId,
-      newSyncVersion,
-      clock,
-      schemaVersion,
-      state,
-    );
-    // sync-state.json.bak is deliberately NOT refreshed here: its adoption is
-    // ref-validated (_loadValidatedSnapshot requires an EQUAL clock against the
-    // ops file's snapshotRef), so a stale — even rotated-key — state .bak is
-    // inert, and it must keep serving the COMPACTION crash window (state
-    // written, ops not yet) it was backed up for.
-    const stateRev = await this._writeStateFile(provider, cfg, encryptKey, stateData);
+    // Creating a split folder: like the ops path, claim sync-data.json first.
+    // Released v2 clients never look at sync-ops.json while sync-data.json is
+    // missing. Then create sync-ops.json create-only. Losing either race defers
+    // the snapshot to the next sync instead of overwriting an acknowledged upload.
+    const isCreating = remoteOpsRev === null;
+    let opsRes: { rev: string };
+    try {
+      let createOpsRev: string | null = null;
+      if (isCreating) {
+        try {
+          const migrated = await this._maybeMigrateLegacyToSplit(
+            provider,
+            cfg,
+            encryptKey,
+            clientId,
+          );
+          createOpsRev = migrated?.rev ?? null;
+        } catch (e) {
+          if (!(e instanceof LegacySyncFormatDetectedError)) throw e;
+          // Only a confirmed overwrite gets here for a v16 folder; reserve it too.
+          await writeTombstoneAndNeutralizeBak(
+            provider,
+            this._encryptAndCompressHandler,
+            cfg,
+            encryptKey,
+            null,
+          );
+        }
+      }
 
-    const opsData: FileBasedOpsFile = {
-      version: FILE_BASED_SYNC_CONSTANTS.SPLIT_FILE_VERSION,
-      syncVersion: newSyncVersion,
-      schemaVersion,
-      vectorClock: clock,
-      snapshotBaseClock: clock,
-      lastModified: Date.now(),
-      clientId,
-      recentOps: [],
-      snapshotRef: { syncVersion: newSyncVersion, vectorClock: clock, rev: stateRev },
-    };
-    const opsEncoded = await this._encryptAndCompressHandler.compressAndEncryptData(
-      cfg,
-      encryptKey,
-      opsData,
-      FILE_BASED_SYNC_CONSTANTS.SPLIT_FILE_VERSION,
-    );
-    this._assertUploadDataNotEmpty(
-      opsEncoded,
-      'FileBasedSyncAdapter._uploadSnapshotSplit',
-    );
-    const opsRes = await this._forceUploadWithBakFirst(
-      provider,
-      FILE_BASED_SYNC_CONSTANTS.OPS_FILE,
-      FILE_BASED_SYNC_CONSTANTS.OPS_BACKUP_FILE,
-      opsEncoded,
-    );
-    await writeTombstoneAndNeutralizeBak(
-      provider,
-      this._encryptAndCompressHandler,
-      cfg,
-      encryptKey,
-    );
+      const stateData = await this._buildStateFileData(
+        clientId,
+        newSyncVersion,
+        clock,
+        schemaVersion,
+        state,
+      );
+      // sync-state.json.bak is deliberately NOT refreshed here: its adoption is
+      // ref-validated (_loadValidatedSnapshot requires an EQUAL clock against the
+      // ops file's snapshotRef), so a stale — even rotated-key — state .bak is
+      // inert, and it must keep serving the COMPACTION crash window (state
+      // written, ops not yet) it was backed up for.
+      const stateRev = await this._writeStateFile(provider, cfg, encryptKey, stateData);
+
+      const opsData: FileBasedOpsFile = {
+        version: FILE_BASED_SYNC_CONSTANTS.SPLIT_FILE_VERSION,
+        syncVersion: newSyncVersion,
+        schemaVersion,
+        vectorClock: clock,
+        snapshotBaseClock: clock,
+        lastModified: Date.now(),
+        clientId,
+        recentOps: [],
+        snapshotRef: { syncVersion: newSyncVersion, vectorClock: clock, rev: stateRev },
+      };
+      const opsEncoded = await this._encryptAndCompressHandler.compressAndEncryptData(
+        cfg,
+        encryptKey,
+        opsData,
+        FILE_BASED_SYNC_CONSTANTS.SPLIT_FILE_VERSION,
+      );
+      this._assertUploadDataNotEmpty(
+        opsEncoded,
+        'FileBasedSyncAdapter._uploadSnapshotSplit',
+      );
+      opsRes = await (isCreating
+        ? this._conditionalUploadRepairSnapshot(
+            provider,
+            FILE_BASED_SYNC_CONSTANTS.OPS_FILE,
+            FILE_BASED_SYNC_CONSTANTS.OPS_BACKUP_FILE,
+            opsEncoded,
+            createOpsRev,
+          )
+        : this._forceUploadWithBakFirst(
+            provider,
+            FILE_BASED_SYNC_CONSTANTS.OPS_FILE,
+            FILE_BASED_SYNC_CONSTANTS.OPS_BACKUP_FILE,
+            opsEncoded,
+          ));
+    } catch (e) {
+      if (!isCreating || !(e instanceof UploadRevToMatchMismatchAPIError)) throw e;
+      // "please retry" keeps the full-state op pending (isRetryableUploadError).
+      return {
+        accepted: false,
+        error: 'Remote sync data changed while creating the sync folder; please retry.',
+      };
+    }
+    if (!isCreating) {
+      await writeTombstoneAndNeutralizeBak(
+        provider,
+        this._encryptAndCompressHandler,
+        cfg,
+        encryptKey,
+      );
+    }
 
     this._expectedSyncVersions.set(providerKey, newSyncVersion);
     this._localSeqCounters.set(providerKey, newSyncVersion);
@@ -2973,7 +3023,7 @@ export class FileBasedSyncAdapterService {
   /**
    * #9023: writes the primary sync file CONDITIONALLY on `revToMatch`, then (only
    * once the primary write wins) refreshes the .bak with the same payload. Used
-   * for automatic REPAIR recovery snapshots so a concurrent write that landed
+   * for automatic REPAIR snapshots and new split folders, so a concurrent write
    * since our last sync throws UploadRevToMatchMismatchAPIError instead of being
    * silently overwritten. Primary-first (unlike `_forceUploadWithBakFirst`) so a
    * lost race leaves the .bak untouched — a stale repair payload must never
