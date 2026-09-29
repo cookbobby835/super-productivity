@@ -75,7 +75,7 @@ import { stripLocalOnlySyncSettingsFromAppData } from '../../../features/config/
  *
  * ## Optimistic Locking
  * Uploads extend an applied baseline. A cold read of a changed revision or an
- * unapplied download cache defers upload until the next download/apply cycle.
+ * unapplied download defers upload until the next download/apply cycle.
  * Conditional writes protect against changes after that read; `syncVersion`
  * identifies upload batches for incremental downloads.
  *
@@ -2282,13 +2282,13 @@ export class FileBasedSyncAdapterService {
     // that write, however little there is to append.
     let isPrimaryCorrupt = false;
 
-    // Only extend a revision this client applied: not a cached download that is
-    // still unapplied, nor a cold read without that revision (for example after
-    // .bak recovery dropped it).
-    const cached = this._getCachedOpsData(providerKey);
-    if (cached && this._pendingExpectedSyncVersions.has(providerKey)) {
+    // Only extend a revision this client applied: not while a download is still
+    // unapplied (like v2, even once its cache expired), nor a cold read without
+    // that revision (for example after .bak recovery dropped it).
+    if (this._pendingExpectedSyncVersions.has(providerKey)) {
       throw new UploadRevToMatchMismatchAPIError('Remote data not applied; retry sync.');
     }
+    const cached = this._getCachedOpsData(providerKey);
     if (cached) {
       opsFile = cached.data;
       opsRev = cached.rev;

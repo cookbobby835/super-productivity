@@ -815,11 +815,14 @@ IDs deduplicate ops still in the local log, while vector clocks carry causality.
    unseen ops during upload, and a restored local log can lag its saved cursor.
    Ordinary uploads only extend a revision this client applied. They reject a
    cold read whose revision differs from the last committed revision (#10239),
-   including a file found where none was committed (a late snapshot-only seed or
-   a backup recovery), and a warm cache whose download was not applied yet. The
-   next cycle downloads/applies that baseline before retrying; rejection does
-   not acknowledge local ops, write the file, or advance the cursor. Warm-cache
-   uploads of an applied download retain the conditional PUT check.
+   including a file found where none is recorded (a seed that landed after an
+   empty download, or after a backup recovery dropped the record). They also
+   wait while a download is staged but not applied, even after its cache
+   expired: a server-migration check that skips seeding is followed by a cursor
+   commit that records its unapplied read. The next cycle downloads/applies that
+   baseline before retrying; rejection does not acknowledge local ops, write the
+   file, or advance the cursor. Warm-cache uploads of an applied download retain
+   the conditional PUT check.
    Legacy ops without `sv` use the file's
    `syncVersion` as a conservative upper bound. After local compaction prunes
    such an op's applied ID, a later file write advances this upper bound past
