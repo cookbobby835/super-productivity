@@ -16,6 +16,7 @@ import {
 } from './file-based-sync.types';
 import {
   AuthFailSPError,
+  EmptyRemoteBodySPError,
   LegacySyncFormatDetectedError,
   EncryptNoPasswordError,
   FileSyncTargetChangedError,
@@ -5281,12 +5282,14 @@ describe('FileBasedSyncAdapterService', () => {
         mockProvider.downloadFile.and.callFake(async (path: string) => {
           const dataStr = files.get(path);
           if (dataStr === undefined) throw new RemoteFileNotFoundAPIError(path);
+          // Like WebDAV: an existing empty file is unreadable, not missing.
+          if (dataStr === '') throw new EmptyRemoteBodySPError(path);
           return { dataStr, rev: revs.get(path)! };
         });
-        mockProvider.getFileRev.and.callFake(async (path: string) => {
-          if (!files.has(path)) throw new RemoteFileNotFoundAPIError(path);
-          return { rev: revs.get(path)! };
-        });
+        // Like WebDAV and LocalFile, getFileRev reads the body.
+        mockProvider.getFileRev.and.callFake(async (path: string) => ({
+          rev: (await mockProvider.downloadFile(path)).rev,
+        }));
         // Compare-and-swap provider: null expects absence, a rev expects that rev.
         mockProvider.uploadFile.and.callFake(
           async (
@@ -5381,6 +5384,90 @@ describe('FileBasedSyncAdapterService', () => {
         expect(files.get(C.SYNC_FILE)).toBe(v2);
         expect(files.has(C.OPS_FILE)).toBeFalse();
         expect(files.has(C.STATE_FILE)).toBeFalse();
+      });
+
+      // "Force overwrite" (#7010, #9627) and encryption changes upload through
+      // here. A file that exists but cannot be read is not an empty folder: v2
+      // clients see it too, so the snapshot replaces it as before.
+      const tombstoneIn = async (
+        cfg: EncryptAndCompressCfg = mockCfg,
+        key?: string,
+      ): Promise<unknown> =>
+        encryptionHandler.decompressAndDecryptData(cfg, key, files.get(C.SYNC_FILE)!);
+      const writtenOps = (): FileBasedOpsFile =>
+        parseWithPrefix(files.get(C.OPS_FILE)!) as unknown as FileBasedOpsFile;
+
+      it('replaces an empty sync-ops.json instead of failing the recovery', async () => {
+        put(C.SYNC_FILE, addPrefix({ version: 3, format: 'split' }, 3));
+        put(C.OPS_FILE, '');
+
+        expect(await seedFolder()).toBe('accepted');
+
+        expect(writtenOps().version).toBe(3);
+        expect(writes.find((w) => w.path === C.OPS_FILE)?.isForce).toBeTrue();
+      });
+
+      for (const [name, body] of [
+        ['empty', ''],
+        [
+          'torn',
+          getSyncFilePrefix({ isCompress: false, isEncrypt: false, modelVersion: 2 }) +
+            '{"syncVersion":',
+        ],
+      ]) {
+        it(`replaces an unreadable (${name}) sync-data.json when no sync-ops.json exists`, async () => {
+          put(C.SYNC_FILE, body);
+
+          expect(await seedFolder()).toBe('accepted');
+
+          expect(await tombstoneIn()).toEqual(
+            jasmine.objectContaining({ version: 3, format: 'split' }),
+          );
+          expect(writtenOps().version).toBe(3);
+        });
+      }
+
+      it('enables encryption over a plaintext v2 file when no sync-ops.json exists', async () => {
+        put(C.SYNC_FILE, addPrefix(createMockSyncData()));
+        const encrypting = service.createAdapter(
+          mockProvider,
+          encryptedCfg,
+          'test-password',
+        );
+
+        const result = await encrypting.uploadSnapshot!(
+          { tasks: [] },
+          'client1',
+          'recovery',
+          { client1: 5 },
+          1,
+          true,
+          'encrypt-op',
+        );
+
+        expect(result.accepted).toBeTrue();
+        expect(await tombstoneIn(encryptedCfg, 'test-password')).toEqual(
+          jasmine.objectContaining({ version: 3, format: 'split' }),
+        );
+      });
+
+      it('still refuses a REPAIR over an unreadable sync-ops.json (#9023 needs its rev)', async () => {
+        put(C.OPS_FILE, '');
+
+        await expectAsync(
+          adapter.uploadSnapshot!(
+            { tasks: [] },
+            'client1',
+            'recovery',
+            { client1: 5 },
+            1,
+            false,
+            'repair-op',
+            false,
+            'REPAIR',
+          ),
+        ).toBeRejectedWithError(EmptyRemoteBodySPError);
+        expect(writes).toEqual([]);
       });
     });
   });

@@ -11,6 +11,7 @@ import {
   waitForSyncComplete,
   WEBDAV_CONFIG_TEMPLATE,
 } from '../../utils/sync-helpers';
+import { translationRegex, translationText } from '../../utils/i18n-strings';
 import { waitForStatePersistence } from '../../utils/waits';
 
 const authorization = `Basic ${Buffer.from('admin:admin').toString('base64')}`;
@@ -144,6 +145,71 @@ test.describe('@webdav v3 snapshot creation reserves the legacy file', () => {
       await expect(b.page.locator('task').filter({ hasText: bTitle })).toBeVisible();
     } finally {
       await closeContextsSafely(a.context, b?.context);
+    }
+  });
+
+  test('force overwrite still replaces an empty sync-ops.json', async ({
+    browser,
+    baseURL,
+    request,
+  }) => {
+    const folder = generateSyncFolderName('v3-empty-ops');
+    const remote = `${WEBDAV_CONFIG_TEMPLATE.baseUrl}${folder}/DEV/`;
+    await createSyncFolder(request, folder);
+    const a = await setupSyncClient(browser, baseURL, [
+      translationRegex('F.SYNC.C.FORCE_UPLOAD'),
+    ]);
+    try {
+      const work = new WorkViewPage(a.page);
+      const sync = new SyncPage(a.page);
+      await work.waitForTaskList();
+      const title = `Survives an empty ops file ${folder}`;
+      await work.addTask(title);
+      await waitForStatePersistence(a.page);
+      await sync.setupWebdavSync({
+        ...WEBDAV_CONFIG_TEMPLATE,
+        syncFolderPath: `/${folder}`,
+        isUseSplitSyncFiles: true,
+      });
+      await waitForSyncComplete(a.page, sync);
+
+      // A server can serve a torn write as an empty body (Koofr, #7010). Without
+      // a backup to recover from, sync can only offer "Force overwrite".
+      const headers = { Authorization: authorization };
+      expect(
+        (await request.put(`${remote}sync-ops.json`, { headers, data: '' })).ok(),
+      ).toBe(true);
+      await request.delete(`${remote}sync-ops.json.bak`, { headers });
+      await sync.triggerSync();
+      await expect(waitForSyncComplete(a.page, sync)).rejects.toThrow('Sync failed');
+      const emptySnack = a.page.locator('snack-custom', {
+        hasText: translationText('F.SYNC.S.ERROR_REMOTE_FILE_EMPTY'),
+      });
+      await emptySnack.locator('button.action').click();
+
+      // The snapshot must replace the file it cannot read, not probe it and fail.
+      const forceFailed = a.page.locator('snack-custom', {
+        hasText: translationText('F.SYNC.S.FORCE_UPLOAD_FAILED'),
+      });
+      const outcome = async (): Promise<string> =>
+        (await forceFailed.isVisible())
+          ? 'force overwrite failed'
+          : (await remoteText(request, `${remote}sync-ops.json`))
+            ? 'sync-ops.json replaced'
+            : 'sync-ops.json empty';
+      await expect.poll(outcome).not.toBe('sync-ops.json empty');
+      expect(await outcome()).toBe('sync-ops.json replaced');
+      const ops = await readPrefixedFile<{ version: number }>(
+        request,
+        `${remote}sync-ops.json`,
+        authorization,
+      );
+      expect(ops.version).toBe(3);
+      await sync.triggerSync();
+      await waitForSyncComplete(a.page, sync);
+      await expect(a.page.locator('task').filter({ hasText: title })).toBeVisible();
+    } finally {
+      await closeContextsSafely(a.context);
     }
   });
 });
