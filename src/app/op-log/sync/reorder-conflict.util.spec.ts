@@ -67,10 +67,7 @@ import { RootState } from '../../root-store/root-state';
 import { operationCaptureMetaReducer } from '../capture/operation-capture.meta-reducer';
 import { Operation } from '../core/operation.types';
 import { PersistentAction } from '../core/persistent-action.interface';
-import {
-  areCommutingReorderAndContentOperations,
-  requiresCausalReplay,
-} from './reorder-conflict.util';
+import { areCommutingReorderAndContentOperations } from './reorder-conflict.util';
 
 /**
  * Pins the one reorder rule to what the reducers write. Every field of every
@@ -527,25 +524,5 @@ describe('reorder rule against the real reducers', () => {
         entityType: 'SIMPLE_COUNTER',
       }),
     ).toBe(false);
-  });
-
-  it('keeps list writes pending without causal proof, never in-place fields', () => {
-    const [order, unpin, lock, settings, count] = [
-      updateNoteOrder({
-        ids: ['b', 'a', 'w'],
-        activeContextType: WorkContextType.PROJECT,
-        activeContextId: P,
-      }),
-      updateNote({ note: { id: 'a', changes: { isPinnedToToday: false } } }),
-      updateNote({ note: { id: 'a', changes: { isLock: true } } }),
-      updateSimpleCounter({ simpleCounter: { id: 'a', changes: { isEnabled: false } } }),
-      setSimpleCounterCounterToday({ id: 'a', newVal: 7, today: DAY }),
-    ].map(toOp);
-    expect(requiresCausalReplay(order)).toBe(true);
-    expect(requiresCausalReplay(unpin)).toBe(true);
-    // These keep the existing fallback (habit settings: #10338).
-    expect(requiresCausalReplay(lock)).toBe(false);
-    expect(requiresCausalReplay(settings)).toBe(false);
-    expect(requiresCausalReplay(count)).toBe(false);
   });
 });

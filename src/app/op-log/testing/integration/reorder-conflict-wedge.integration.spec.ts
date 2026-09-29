@@ -74,6 +74,7 @@ import {
   OpType,
 } from '../../core/operation.types';
 import { UnsupportedMultiEntityConflictError } from '../../core/errors/sync-errors';
+import { toLwwUpdateActionType } from '../../core/lww-update-action-types';
 import { PersistentAction } from '../../core/persistent-action.interface';
 import { OperationLogStoreService } from '../../persistence/operation-log-store.service';
 import { ConflictResolutionService } from '../../sync/conflict-resolution.service';
@@ -583,39 +584,66 @@ describe('reorder conflicts: real store, applier, reducers and durable replay (#
     );
   });
 
-  it('keeps a pending unpin pending after its conflict evidence is compacted', async () => {
-    const unpin = updateNote({
-      note: { id: IDS[0], changes: { isPinnedToToday: false } },
-    });
-    const local = capture(unpin, 'local', 1000);
-    const remote = capture(actionsFor('project notes').order, 'remote', 2000);
-    store.dispatch(unpin);
-    await db.append(local, 'local');
-    await TestBed.inject(ConflictResolutionService).autoResolveConflictsLWW([], [remote]);
-    const before = await state();
-    expect(before.note.todayOrder).not.toContain(IDS[0]);
-    const snapshotClock = { ...local.vectorClock, ...remote.vectorClock };
-    await db.saveStateCache({
-      state: { ...before, project: before.projects } as unknown as AppDataComplete,
-      lastAppliedOpSeq: await db.getLastSeq(),
-      vectorClock: snapshotClock,
-      compactedAt: Date.now(),
-      schemaVersion: local.schemaVersion,
-    });
-    await db.deleteOpsWhere((row) => row.op.id === remote.id);
-    const retained = await db.getOpsAfterSeq(0);
-    // Entity LWW would carry isPinnedToToday but not the Today list write.
-    await expectAsync(
-      TestBed.inject(SupersededOperationResolverService).resolveSupersededLocalOps(
+  // Without causal proof a pin keeps the whole-note snapshot fallback: stopping
+  // sync would leave the whole-dataset replacement as the only way out. The
+  // snapshot carries isPinnedToToday but not receivers' Today list write (a
+  // documented gap). Proof is missing after compaction, and on clock-gap
+  // rejections against a retained row that is no commuting reorder.
+  for (const evidence of ['compacted order row', 'unrelated retained edit'] as const) {
+    it(`falls back to the note snapshot for an unpin without causal proof (${evidence})`, async () => {
+      const unpin = updateNote({
+        note: { id: IDS[0], changes: { isPinnedToToday: false } },
+      });
+      const local = capture(unpin, 'local', 1000);
+      const remote = capture(
+        evidence === 'compacted order row'
+          ? actionsFor('project notes').order
+          : updateNote({ note: { id: IDS[0], changes: { content: 'remote content' } } }),
+        'remote',
+        2000,
+      );
+      store.dispatch(unpin);
+      await db.append(local, 'local');
+      await TestBed.inject(ConflictResolutionService).autoResolveConflictsLWW(
+        [],
+        [remote],
+      );
+      const before = await state();
+      expect(before.note.todayOrder).not.toContain(IDS[0]);
+      const snapshotClock = { ...local.vectorClock, ...remote.vectorClock };
+      if (evidence === 'compacted order row') {
+        await db.saveStateCache({
+          state: { ...before, project: before.projects } as unknown as AppDataComplete,
+          lastAppliedOpSeq: await db.getLastSeq(),
+          vectorClock: snapshotClock,
+          compactedAt: Date.now(),
+          schemaVersion: local.schemaVersion,
+        });
+        await db.deleteOpsWhere((row) => row.op.id === remote.id);
+      }
+      const created = await TestBed.inject(
+        SupersededOperationResolverService,
+      ).resolveSupersededLocalOps(
         [{ opId: local.id, op: local, existingClock: remote.vectorClock }],
         [remote.vectorClock],
         snapshotClock,
-      ),
-    ).toBeRejectedWithError(UnsupportedMultiEntityConflictError);
-    expect(await db.getOpsAfterSeq(0)).toEqual(retained);
-    expect((await db.getUnsynced()).map((row) => row.op.id)).toEqual([local.id]);
-    expect(await state()).toEqual(before);
-  });
+      );
+      expect(created).toBe(1);
+      expect((await db.getOpById(local.id))?.rejectedAt).toBeDefined();
+      const unsynced = (await db.getUnsynced()).map((row) => row.op);
+      expect(unsynced.length).toBe(1);
+      const [replacement] = unsynced;
+      expect(replacement.actionType).toBe(toLwwUpdateActionType('NOTE'));
+      expect(replacement.entityId).toBe(IDS[0]);
+      expect(actionPayloadOf(replacement)).toEqual(
+        jasmine.objectContaining({ id: IDS[0], isPinnedToToday: false }),
+      );
+      expect(compareVectorClocks(replacement.vectorClock, remote.vectorClock)).toBe(
+        VectorClockComparison.GREATER_THAN,
+      );
+      expect(await state()).toEqual(before);
+    });
+  }
 
   it('keeps a disabled habit edit independent of the reissued enabled-only order', async () => {
     const pair = actionsFor('habits');

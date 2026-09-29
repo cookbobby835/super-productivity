@@ -104,6 +104,8 @@ const dayCount = (day: 'today' | 'date'): PatchShape => ({
 /**
  * Absolute single-entity patches: a replacement with current values is a local
  * no-op. Deltas, moves, deletes and every unlisted action never commute here.
+ * Without causal proof a rejected patch keeps the entity LWW fallback; for a pin
+ * that snapshot omits receivers' `todayOrder` write (section-conflict-replay.md).
  */
 const PATCHES: Partial<Record<ActionType, PatchShape>> = {
   [ActionType.NOTE_UPDATE]: entityUpdate('NOTE', 'note'),
@@ -124,7 +126,7 @@ const payloadOf = (op: Operation): Payload =>
   (extractActionPayload(op.payload) ?? {}) as Payload;
 
 /** Match the UI's actual list write, including its declared conflict footprint. */
-const isContentReorderOperation = (op: Operation): boolean => {
+export const isContentReorderOperation = (op: Operation): boolean => {
   if (REORDERS.get(op.actionType) !== op.entityType || op.opType !== OpType.Move)
     return false;
   const payload = payloadOf(op);
@@ -219,14 +221,6 @@ export const areCommutingReorderAndContentOperations = (
   (isReorderAndEdit(a, b) || isReorderAndEdit(b, a)) &&
   !(writesTodayOrder(b) && pending.some((op) => op !== b && writesTodayOrder(op)));
 
-/**
- * Rejected ops whose semantics entity LWW cannot carry: a reorder's list write
- * and a patch's Today membership write. Without their causal proof they stay
- * pending instead of falling back to an entity snapshot.
- */
-export const requiresCausalReplay = (op: Operation): boolean =>
-  isContentReorderOperation(op) || writesTodayOrder(op);
-
 const entityOf = (
   snapshot: ReorderReplaySnapshot,
   entityType: EntityType,
@@ -264,7 +258,7 @@ export const projectReorderConflictAgainstState = (
   const patch = PATCHES[operation.actionType];
   if (patch) {
     // Whole-entity LWW would overwrite unrelated fields and stamp modified (and
-    // released clients strip SimpleCounter.type); a patch of its own fields not.
+    // released clients strip SimpleCounter.type); a patch of its own fields does not.
     const id = operation.entityId!;
     const entity = entityOf(snapshot, patch.entityType, id);
     if (!entity) return { kind: 'superseded' };

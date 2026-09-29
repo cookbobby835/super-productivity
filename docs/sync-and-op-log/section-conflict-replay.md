@@ -106,15 +106,22 @@ and its reissue.
 Deletions, container moves, competing reorders and Today membership against a
 Today or tag reorder are not recognized. Missing, ambiguous, malformed or
 non-commuting evidence does not admit replay. Recognized content reorders
-(including section reorders) and patches that write Today membership
-(`requiresCausalReplay()`) then remain pending with
+(including section reorders) then remain pending with
 `UnsupportedMultiEntityConflictError`: generic entity LWW loses list writes.
 `COUNTER_SET_TODAY` and `COUNTER_SET_FOR_DATE` need no causal proof: each is
 reissued with its original day's current count (a local no-op), because a
 whole-habit LWW snapshot overwrites unrelated fields (released receivers also
 drop the habit's type) and stopping sync would block habit clicks. Other patches
-retain their existing fallback: without proof, a rejected habit settings edit
-still becomes a whole-habit LWW snapshot (#10338 changes that snapshot).
+retain their existing fallback: without proof, a rejected patch becomes a
+whole-entity LWW snapshot (#10338 changes that snapshot for habits).
+
+A pin or unpin without proof keeps that fallback too. Proof can be missing
+after compaction removed the conflict row, and on clock-gap rejections that no
+downloaded op explains, which need not involve a reorder at all. Stopping there
+would leave the whole-dataset replacement as the only way out. Known gap: the
+note snapshot carries `isPinnedToToday` but not receivers' `note.todayOrder`
+write, so their Today list can miss the change. A pin that wins a download-time
+LWW conflict against another edit of the same note already has the same gap.
 
 ## State-based projection
 
