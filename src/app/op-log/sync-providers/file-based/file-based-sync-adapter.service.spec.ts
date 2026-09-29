@@ -3981,7 +3981,7 @@ describe('FileBasedSyncAdapterService', () => {
       ...o,
     });
 
-    // Valid compact op (short-key encoded) so _compactToSyncOp() can decode it.
+    // Valid compact op (short-key encoded) so compactToSyncOp() can decode it.
     const makeCompactOp = (over: Record<string, unknown> = {}): never =>
       ({
         id: 'op-1',
@@ -4813,12 +4813,16 @@ describe('FileBasedSyncAdapterService', () => {
           3,
         ),
       });
-      // This client wrote the marker before restarting, so it has seen that rev.
-      (service as unknown as { _lastSeenRevs: Map<string, string> })._lastSeenRevs.set(
-        mockProvider.id,
-        `${C.OPS_FILE}-rev`,
-      );
+      // A migrator never records its own marker as seen, so after a restart the
+      // marker is not a revision this client applied: the upload writes nothing.
+      await expectAsync(
+        adapter.uploadOps([createMockSyncOp()], 'client1'),
+      ).toBeRejectedWithError(UploadRevToMatchMismatchAPIError);
+      expect(mockProvider.uploadFile).not.toHaveBeenCalled();
 
+      // The next cycle's download completes the marker (e2b); the upload then
+      // appends to the finalized ops file.
+      await applyDownload(0);
       await adapter.uploadOps([createMockSyncOp()], 'client1');
 
       const paths = uploadedPaths();
@@ -4831,7 +4835,7 @@ describe('FileBasedSyncAdapterService', () => {
         opsUploads[opsUploads.length - 1][1] as string,
       ) as unknown as FileBasedOpsFile;
       expect(finalized.migration).toBeUndefined();
-      expect(finalized.recentOps.some((op) => op.id === 'legacy-op')).toBe(true);
+      expect(finalized.recentOps.map((op) => op.id)).toEqual(['legacy-op', 'op-123']);
     });
 
     it('(e2b) resumes a pending migration during the next download cycle', async () => {
