@@ -34,6 +34,7 @@ import {
   downloadLegacySyncFile,
   annotatePrimaryRev,
   EMPTY_FOLDER_SYNC_FORMAT,
+  isUnreadableExistingFile,
 } from './file-based-sync-format';
 import {
   GuardedFileSyncProvider,
@@ -2746,17 +2747,18 @@ export class FileBasedSyncAdapterService {
   ): Promise<SnapshotUploadResponse> {
     const newSyncVersion = 1;
     const clock = vectorClock as VectorClock;
+    const { OPS_FILE, OPS_BACKUP_FILE } = FILE_BASED_SYNC_CONSTANTS;
 
-    // `getFileRev` reads metadata only — no decode — so a torn/undecryptable
-    // remote does not block the snapshot. Missing ops file → this creates the folder.
+    // No decode, so an undecryptable remote does not block the snapshot. WebDAV and
+    // LocalFile read the body, and an empty ops file still exists: "Force overwrite"
+    // (#7010) replaces it. REPAIR needs its rev. Missing → this creates the folder.
     let remoteOpsRev: string | null = null;
+    let isCreating = false;
     try {
-      remoteOpsRev = (await provider.getFileRev(FILE_BASED_SYNC_CONSTANTS.OPS_FILE, null))
-        .rev;
+      remoteOpsRev = (await provider.getFileRev(OPS_FILE, null)).rev;
     } catch (e) {
-      if (!(e instanceof RemoteFileNotFoundAPIError)) {
-        throw e;
-      }
+      if (e instanceof RemoteFileNotFoundAPIError) isCreating = true;
+      else if (!isUnreadableExistingFile(e) || snapshotOpType === 'REPAIR') throw e;
     }
     // #9023: same concurrency guard as the single-file path — a REPAIR recovery
     // snapshot must not overwrite a remote that advanced since our last sync.
@@ -2786,7 +2788,6 @@ export class FileBasedSyncAdapterService {
     // Released v2 clients never look at sync-ops.json while sync-data.json is
     // missing. Then create sync-ops.json create-only. Losing either race defers
     // the snapshot to the next sync instead of overwriting an acknowledged upload.
-    const isCreating = remoteOpsRev === null;
     let opsRes: { rev: string };
     try {
       let createOpsRev: string | null = null;
@@ -2800,15 +2801,19 @@ export class FileBasedSyncAdapterService {
           );
           createOpsRev = migrated?.rev ?? null;
         } catch (e) {
-          if (!(e instanceof LegacySyncFormatDetectedError)) throw e;
-          // Only a confirmed overwrite gets here for a v16 folder; reserve it too.
-          await writeTombstoneAndNeutralizeBak(
-            provider,
-            this._encryptAndCompressHandler,
-            cfg,
-            encryptKey,
-            null,
-          );
+          // v2 clients see an existing sync-data.json this client cannot read, so
+          // there is no empty folder to claim: replace it as before.
+          if (isUnreadableExistingFile(e)) isCreating = false;
+          else if (e instanceof LegacySyncFormatDetectedError) {
+            // Only a confirmed overwrite gets here for a v16 folder; reserve it too.
+            await writeTombstoneAndNeutralizeBak(
+              provider,
+              this._encryptAndCompressHandler,
+              cfg,
+              encryptKey,
+              null,
+            );
+          } else throw e;
         }
       }
 
@@ -2850,17 +2855,12 @@ export class FileBasedSyncAdapterService {
       opsRes = await (isCreating
         ? this._conditionalUploadRepairSnapshot(
             provider,
-            FILE_BASED_SYNC_CONSTANTS.OPS_FILE,
-            FILE_BASED_SYNC_CONSTANTS.OPS_BACKUP_FILE,
+            OPS_FILE,
+            OPS_BACKUP_FILE,
             opsEncoded,
             createOpsRev,
           )
-        : this._forceUploadWithBakFirst(
-            provider,
-            FILE_BASED_SYNC_CONSTANTS.OPS_FILE,
-            FILE_BASED_SYNC_CONSTANTS.OPS_BACKUP_FILE,
-            opsEncoded,
-          ));
+        : this._forceUploadWithBakFirst(provider, OPS_FILE, OPS_BACKUP_FILE, opsEncoded));
     } catch (e) {
       if (!isCreating || !(e instanceof UploadRevToMatchMismatchAPIError)) throw e;
       // "please retry" keeps the full-state op pending (isRetryableUploadError).

@@ -13,6 +13,7 @@ import {
   LegacySyncFormatDetectedError,
   RemoteFileNotFoundAPIError,
   SplitSyncFormatDetectedError,
+  SyncDataCorruptedError,
 } from '../../core/errors/sync-errors';
 
 type Provider = FileSyncProvider<SyncProviderId>;
@@ -56,6 +57,18 @@ export const annotatePrimaryRev = (e: unknown, rev: string): unknown => {
   }
   return e;
 };
+
+/**
+ * Whether `e` proves a remote file exists although this client cannot read it: the
+ * provider read no usable body, or the body did not decode (see annotatePrimaryRev).
+ * A newer format is healthy, so it never counts (#8764).
+ */
+export const isUnreadableExistingFile = (e: unknown): boolean =>
+  e instanceof InvalidDataSPError ||
+  (!!e &&
+    typeof e === 'object' &&
+    'primaryRev' in e &&
+    !(e instanceof SyncDataCorruptedError && e.isRemoteNewer));
 
 const isSplitTombstone = (data: unknown): data is FileBasedSplitTombstone => {
   const d = data as Partial<FileBasedSplitTombstone> | null;
