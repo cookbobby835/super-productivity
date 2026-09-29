@@ -158,6 +158,7 @@ export const diffPaths = (
  * - `modified`: reducers stamp it with the applying device's clock on every
  *   update (task CRUD, lwwUpdateMetaReducer), so it never converges;
  * - `isDataLoaded`: a runtime flag hydration sets on the task slice;
+ * - `lastFlush`: write-only archive bookkeeping (ArchiveService), never read;
  * - empty objects, which equal a missing key (an archive flush run locally
  *   leaves `{}` where the remote flush leaves nothing).
  */
@@ -165,6 +166,7 @@ export const comparable = (state: unknown): unknown =>
   JSON.parse(JSON.stringify(state), (key, value: unknown) =>
     key === 'modified' ||
     key === 'isDataLoaded' ||
+    key === 'lastFlush' ||
     (key !== '' &&
       value !== null &&
       typeof value === 'object' &&

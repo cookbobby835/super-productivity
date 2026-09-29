@@ -631,5 +631,231 @@
       }
     ],
     "rejections": []
+  },
+  {
+    "class": "reorder-wedge",
+    "issue": "TODO: link the filed issue (fix: #10364)",
+    "name": "a project note reorder crossing a delete stops the deleting device",
+    "steps": [
+      {
+        "d": "B",
+        "a": ["deleteNote", "n1"]
+      },
+      {
+        "d": "A",
+        "a": ["reorderNotes", "P", 3, 0]
+      }
+    ],
+    "failures": [
+      {
+        "signature": "stop:SYNC_MULTI_ENTITY_UNSUPPORTED side=remote actionType=[Note] Update Note Order entityCount=2",
+        "detail": "step 3 B: SYNC_MULTI_ENTITY_UNSUPPORTED side=remote actionType=[Note] Update Note Order entityCount=2"
+      },
+      {
+        "signature": "pending",
+        "detail": "B has 1 unsynced op(s)"
+      },
+      {
+        "signature": "divergence:.note.entities.*",
+        "detail": "B vs fresh at .note.entities.n1:  vs {\"id\":\"n1\",\"projectId\":\"INBOX_PROJECT\",\"isPinnedToToday\":false,\"content\":\"n1\",\"created\":<time>,\"modified\":<time>}"
+      },
+      {
+        "signature": "divergence:.note.ids.*",
+        "detail": "B vs fresh at .note.ids.2:  vs \"n1\""
+      },
+      {
+        "signature": "divergence:.project.entities.*.noteIds.*",
+        "detail": "B vs fresh at .project.entities.INBOX_PROJECT.noteIds.0: \"n2\" vs \"n1\""
+      }
+    ],
+    "rejections": []
+  },
+  {
+    "class": "reorder-wedge",
+    "issue": "TODO: link the filed issue (fix: #10364)",
+    "name": "a stopped device's later additions never reach the other devices",
+    "steps": [
+      {
+        "d": "C",
+        "a": ["addTask", "t13", "P"]
+      },
+      {
+        "d": "A",
+        "a": ["editHabit", "h1", "isEnabled", false]
+      },
+      {
+        "d": "C",
+        "a": ["reorderHabits", 3, 4]
+      }
+    ],
+    "failures": [
+      {
+        "signature": "stop:SYNC_MULTI_ENTITY_UNSUPPORTED side=local actionType=[SimpleCounter] Update SimpleCounter Order entityCount=3",
+        "detail": "step 4 C: SYNC_MULTI_ENTITY_UNSUPPORTED side=local actionType=[SimpleCounter] Update SimpleCounter Order entityCount=3"
+      },
+      {
+        "signature": "pending",
+        "detail": "C has 2 unsynced op(s)"
+      },
+      {
+        "signature": "divergence:.project.entities.*.taskIds.*",
+        "detail": "C vs fresh at .project.entities.INBOX_PROJECT.taskIds.0: \"t13\" vs \"t3\""
+      },
+      {
+        "signature": "divergence:.simpleCounter.entities.*.isEnabled",
+        "detail": "C vs fresh at .simpleCounter.entities.h1.isEnabled: true vs false"
+      },
+      {
+        "signature": "divergence:.simpleCounter.ids.*",
+        "detail": "C vs fresh at .simpleCounter.ids.3: \"h2\" vs \"h1\""
+      },
+      {
+        "signature": "divergence:.task.entities.*",
+        "detail": "C vs fresh at .task.entities.t13: {\"id\":\"t13\",\"subTaskIds\":[],\"timeSpentOnDay\":{},\"timeSpent\":0,\"timeEstimate\":0,\"isDone\":false,\"title\":\"t13\",\"tagIds\":[],\"created\":<time>,\"attachments\":[] vs "
+      },
+      {
+        "signature": "divergence:.task.ids.*",
+        "detail": "C vs fresh at .task.ids.3: \"t13\" vs "
+      },
+      {
+        "signature": "lost-entity:task",
+        "detail": "task:t13 was never deleted"
+      }
+    ],
+    "rejections": []
+  },
+  {
+    "class": "delete-vs-delta-recreate",
+    "issue": "TODO: link the filed issue",
+    "name": "a task deleted while another device tracks it comes back without the time, with the delta arguments as fields",
+    "steps": [
+      {
+        "d": "A",
+        "a": ["deleteTask", "t1"]
+      },
+      {
+        "d": "B",
+        "a": ["track", "t1", 2000],
+        "s": 1
+      }
+    ],
+    "failures": [
+      {
+        "signature": "divergence:.task.entities.*.date",
+        "detail": "A vs fresh at .task.entities.t1.date: \"2026-09-30\" vs "
+      },
+      {
+        "signature": "divergence:.task.entities.*.duration",
+        "detail": "A vs fresh at .task.entities.t1.duration: 2000 vs "
+      },
+      {
+        "signature": "divergence:.task.entities.*.subTasks",
+        "detail": "A vs fresh at .task.entities.t1.subTasks: [] vs "
+      },
+      {
+        "signature": "divergence:.task.entities.*.taskId",
+        "detail": "A vs fresh at .task.entities.t1.taskId: \"t1\" vs "
+      },
+      {
+        "signature": "divergence:.task.entities.*.timeSpent",
+        "detail": "A vs fresh at .task.entities.t1.timeSpent: 0 vs 2000"
+      },
+      {
+        "signature": "divergence:.task.entities.*.timeSpentOnDay",
+        "detail": "A vs fresh at .task.entities.t1.timeSpentOnDay: {} vs {\"2026-09-30\":2000}"
+      },
+      {
+        "signature": "divergence:.task.ids.*",
+        "detail": "A vs fresh at .task.ids.0: \"t2\" vs \"t1\""
+      }
+    ],
+    "rejections": []
+  },
+  {
+    "class": "restart-changes-state",
+    "issue": "TODO: link the filed issue",
+    "name": "after a delete, a recreate and concurrent renames, a restart changes the time and title",
+    "steps": [
+      {
+        "d": "A",
+        "a": ["deleteTask", "t2"]
+      },
+      {
+        "d": "A",
+        "s": 1
+      },
+      {
+        "d": "C",
+        "a": ["renameTask", "t2", "C8"],
+        "s": 1
+      },
+      {
+        "d": "A",
+        "s": 1
+      },
+      {
+        "d": "B",
+        "a": ["renameTask", "t2", "B13"]
+      },
+      {
+        "d": "A",
+        "a": ["track", "t2", 3000]
+      },
+      {
+        "d": "B",
+        "s": 1
+      }
+    ],
+    "failures": [
+      {
+        "signature": "divergence:.project.entities.*.taskIds.*",
+        "detail": "A vs fresh at .project.entities.INBOX_PROJECT.taskIds.1: \"t2\" vs \"t1\""
+      },
+      {
+        "signature": "divergence:.task.entities.*.timeSpent",
+        "detail": "A vs fresh at .task.entities.t2.timeSpent: 3000 vs 0"
+      },
+      {
+        "signature": "divergence:.task.entities.*.timeSpentOnDay",
+        "detail": "A vs fresh at .task.entities.t2.timeSpentOnDay: {\"2026-09-30\":3000} vs {}"
+      },
+      {
+        "signature": "divergence:.task.entities.*.title",
+        "detail": "A vs fresh at .task.entities.t2.title: \"C8\" vs \"B13\""
+      },
+      {
+        "signature": "divergence:.tag.entities.*.taskIds.*",
+        "detail": "B vs fresh at .tag.entities.TODAY.taskIds.0: \"t2\" vs \"t1\""
+      },
+      {
+        "signature": "divergence:.task.ids.*",
+        "detail": "B vs fresh at .task.ids.1: \"t2\" vs \"t3\""
+      },
+      {
+        "signature": "restart-changed:.project.entities.*.taskIds.*",
+        "detail": "B after vs before restart at .project.entities.INBOX_PROJECT.taskIds.1: \"t1\" vs \"t2\""
+      },
+      {
+        "signature": "restart-changed:.tag.entities.*.taskIds.*",
+        "detail": "B after vs before restart at .tag.entities.TODAY.taskIds.0: \"t1\" vs \"t2\""
+      },
+      {
+        "signature": "restart-changed:.task.entities.*.timeSpent",
+        "detail": "B after vs before restart at .task.entities.t2.timeSpent: 0 vs 3000"
+      },
+      {
+        "signature": "restart-changed:.task.entities.*.timeSpentOnDay",
+        "detail": "B after vs before restart at .task.entities.t2.timeSpentOnDay: {} vs {\"2026-09-30\":3000}"
+      },
+      {
+        "signature": "restart-changed:.task.entities.*.title",
+        "detail": "B after vs before restart at .task.entities.t2.title: \"B13\" vs \"C8\""
+      },
+      {
+        "signature": "restart-changed:.task.ids.*",
+        "detail": "B after vs before restart at .task.ids.1: \"t3\" vs \"t2\""
+      }
+    ],
+    "rejections": ["CONFLICT_CONCURRENT [TASK] LWW Update"]
   }
 ]
