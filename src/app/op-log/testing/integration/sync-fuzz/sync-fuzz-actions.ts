@@ -1,6 +1,7 @@
 import { TestBed } from '@angular/core/testing';
 import { Action } from '@ngrx/store';
 import { ArchiveDbAdapter } from '../../../../core/persistence/archive-db-adapter.service';
+import { ArchiveService } from '../../../../features/archive/archive.service';
 import {
   addNote,
   deleteNote,
@@ -42,7 +43,7 @@ import { SyncFuzzHarness } from './sync-fuzz-harness';
  * whose target is missing on that device (e.g. after shrinking) is skipped.
  */
 export type Intent =
-  | ['addTask', string]
+  | ['addTask', string, 'P' | 'T']
   | ['renameTask', string, string]
   | ['doneTask', string, boolean]
   | ['track', string, number]
@@ -141,13 +142,14 @@ export const executeIntent = async (
 
   switch (intent[0]) {
     case 'addTask': {
-      const [, id] = intent;
+      // Added in the project view, or in Today, which schedules it for today.
+      const [, id, ctx] = intent;
       if (task(id)) return undefined;
       await run(
         TaskSharedActions.addTask({
-          task: newTask(id),
-          workContextId: INBOX,
-          workContextType: WorkContextType.PROJECT,
+          task: { ...newTask(id), ...(ctx === 'T' ? { dueDay: day } : {}) },
+          workContextId: ctx === 'T' ? 'TODAY' : INBOX,
+          workContextType: ctx === 'T' ? WorkContextType.TAG : WorkContextType.PROJECT,
           isAddToBacklog: false,
           isAddToBottom: false,
         }),
@@ -175,7 +177,11 @@ export const executeIntent = async (
       const t = task(id);
       if (!t) return undefined;
       // TaskService tick + _flushAccumulatedTimeSpent: local add, then the
-      // persistent task delta and the touched contexts' session data.
+      // persistent task delta and the touched contexts' session data. The
+      // first tick of an unscheduled task also plans it for today
+      // (TaskRelatedModelEffects.autoAddTodayTagOnTracking, on by default;
+      // replicated here because its distinctUntilChanged memory would be
+      // shared between devices).
       await run(
         TimeTrackingActions.addTimeSpent({
           task: t,
@@ -183,6 +189,15 @@ export const executeIntent = async (
           duration,
           isFromTrackingReminder: false,
         }),
+        ...(!t.dueDay && typeof t.dueWithTime !== 'number'
+          ? [
+              TaskSharedActions.planTasksForToday({
+                taskIds: [id],
+                today: day,
+                startOfNextDayDiffMs: 0,
+              }),
+            ]
+          : []),
         syncTimeSpent({ taskId: id, date: day, duration }),
       );
       const tracked = viewOf(await harness.state()).timeTracking;
@@ -211,7 +226,11 @@ export const executeIntent = async (
       const [, id] = intent;
       const t = task(id);
       if (!t || !t.isDone || t.parentId) return undefined;
-      await run(TaskSharedActions.moveToArchive({ tasks: [{ ...t, subTasks: [] }] }));
+      // TaskService.moveToArchive: persist to the archive first (the local
+      // ArchiveOperationHandler skips moveToArchive), then dispatch.
+      const tasks = [{ ...t, subTasks: [] }];
+      await TestBed.inject(ArchiveService).moveTasksToArchiveAndFlushArchiveIfDue(tasks);
+      await run(TaskSharedActions.moveToArchive({ tasks }));
       return [];
     }
     case 'restoreTask': {
@@ -319,7 +338,9 @@ export const executeIntent = async (
 
 type Random = () => number;
 
-const WEIGHTS: [Intent[0], number][] = [
+export type IntentWeights = [Intent[0], number][];
+
+export const DEFAULT_WEIGHTS: IntentWeights = [
   ['renameTask', 3],
   ['track', 4],
   ['doneTask', 1],
@@ -336,7 +357,6 @@ const WEIGHTS: [Intent[0], number][] = [
   ['reorderHabits', 3],
   ['addHabit', 0.5],
 ];
-const TOTAL_WEIGHT = WEIGHTS.reduce((sum, [, w]) => sum + w, 0);
 
 /** Picks an intent that applies to this device's state (up to a few tries). */
 export const generateIntent = (
@@ -345,19 +365,21 @@ export const generateIntent = (
   archivedTaskIds: readonly string[],
   label: string,
   nextId: (prefix: string) => string,
+  weights: IntentWeights = DEFAULT_WEIGHTS,
 ): Intent | undefined => {
   const pick = <T>(items: readonly T[]): T | undefined =>
     items.length ? items[Math.floor(random() * items.length)] : undefined;
   const index = (): number => Math.floor(random() * 8);
+  const total = weights.reduce((sum, [, w]) => sum + w, 0);
   for (let attempt = 0; attempt < 5; attempt++) {
-    let roll = random() * TOTAL_WEIGHT;
-    const kind = WEIGHTS.find(([, w]) => (roll -= w) < 0)?.[0] ?? 'track';
+    let roll = random() * total;
+    const kind = weights.find(([, w]) => (roll -= w) < 0)?.[0] ?? 'track';
     const t = pick(view.tasks);
     const n = pick(view.notes);
     const h = pick(view.habits);
     switch (kind) {
       case 'addTask':
-        return ['addTask', nextId('t')];
+        return ['addTask', nextId('t'), random() < 0.5 ? 'P' : 'T'];
       case 'renameTask':
         if (t) return ['renameTask', t.id, label];
         break;
@@ -414,9 +436,9 @@ export const generateIntent = (
 
 /** Entities device A creates before the others join. */
 export const SETUP_INTENTS: Intent[] = [
-  ['addTask', 't1'],
-  ['addTask', 't2'],
-  ['addTask', 't3'],
+  ['addTask', 't1', 'T'],
+  ['addTask', 't2', 'T'],
+  ['addTask', 't3', 'P'],
   ['addNote', 'n1', 'P'],
   ['addNote', 'n2', 'P'],
   ['addNote', 'n3', 'T'],

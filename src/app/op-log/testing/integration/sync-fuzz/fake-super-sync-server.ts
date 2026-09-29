@@ -374,7 +374,7 @@ export class FakeSuperSyncServer {
 
   /** detectConflictForEntity, including its pre-v2 GLOBAL_CONFIG:misc alias. */
   private _detectConflictForEntity(op: SyncOperation, entityId: string): ConflictResult {
-    let existing = this.latestEntityOp(op.entityType, entityId);
+    const existing = this.latestEntityOp(op.entityType, entityId);
     if (op.entityType === 'GLOBAL_CONFIG' && entityId === 'tasks') {
       const legacy = [...this.rows]
         .reverse()
@@ -385,7 +385,9 @@ export class FakeSuperSyncServer {
             row.op.schemaVersion < MISC_TASKS_SPLIT_SCHEMA_VERSION,
         );
       if (legacy && (!existing || legacy.serverSeq > existing.serverSeq)) {
-        existing = legacy;
+        // The server selects no action_type for the legacy row.
+        const { clientId, vectorClock } = legacy.op;
+        return resolveConflictForExistingOp(op, entityId, { clientId, vectorClock });
       }
     }
     return existing

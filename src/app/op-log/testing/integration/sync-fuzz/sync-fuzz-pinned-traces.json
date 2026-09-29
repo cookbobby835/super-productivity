@@ -1,0 +1,230 @@
+[
+  {
+    "class": "reorder-wedge",
+    "issue": "TODO: link the filed issue (fix: #10364)",
+    "name": "project note reorder crossing a pin stops the pinning device",
+    "steps": [
+      { "d": "C", "a": ["reorderNotes", "P", 6, 3] },
+      { "d": "C", "s": 1 },
+      { "d": "A", "a": ["editNote", "n1", "isPinnedToToday", true] }
+    ],
+    "failures": [],
+    "rejections": []
+  },
+  {
+    "class": "reorder-wedge",
+    "issue": "TODO: link the filed issue (fix: #10364)",
+    "name": "Today note reorder crossing an unpin stops the unpinning device",
+    "steps": [
+      { "d": "B", "a": ["editNote", "n2", "isPinnedToToday", true] },
+      { "d": "A", "a": ["editNote", "n1", "isPinnedToToday", true] },
+      { "d": "C", "a": ["editNote", "n3", "isPinnedToToday", false] },
+      { "d": "A", "s": 1 },
+      { "d": "B", "s": 1 },
+      { "d": "B", "a": ["reorderNotes", "T", 6, 7] }
+    ],
+    "failures": [],
+    "rejections": []
+  },
+  {
+    "class": "reorder-wedge",
+    "issue": "TODO: link the filed issue (fix: #10364)",
+    "name": "habit reorder crossing a rename stops the renaming device",
+    "steps": [
+      { "d": "C", "a": ["editHabit", "STRETCHING_COUNTER", "isEnabled", true] },
+      { "d": "B", "a": ["editHabit", "STRETCHING_COUNTER", "title", "B6"] },
+      { "d": "C", "a": ["reorderHabits", 0, 1], "s": 1 }
+    ],
+    "failures": [],
+    "rejections": []
+  },
+  {
+    "class": "reorder-wedge",
+    "issue": "TODO: link the filed issue (fix: #10364)",
+    "name": "pending habit reorder crossing a rename stops the reordering device",
+    "steps": [
+      { "d": "A", "a": ["editHabit", "h3", "title", "A6"] },
+      { "d": "C", "a": ["editHabit", "h1", "isEnabled", false] },
+      { "d": "C", "a": ["reorderHabits", 5, 0] }
+    ],
+    "failures": [],
+    "rejections": []
+  },
+  {
+    "class": "reorder-wedge",
+    "issue": "TODO: link the filed issue (fix: #10364)",
+    "name": "two concurrent habit reorders stop the second device",
+    "steps": [
+      { "d": "A", "a": ["reorderHabits", 1, 2] },
+      { "d": "B", "a": ["reorderHabits", 5, 0] }
+    ],
+    "failures": [],
+    "rejections": []
+  },
+  {
+    "class": "time-delta-server-rejection",
+    "issue": "TODO: link the filed issue (fix: #10340)",
+    "name": "a pending delta crossing a rename loses another device's concurrent time",
+    "steps": [
+      { "d": "B", "a": ["renameTask", "t2", "B0"], "s": 1 },
+      { "d": "C", "a": ["track", "t2", 1000] },
+      { "d": "A", "a": ["track", "t2", 1000] }
+    ],
+    "failures": [],
+    "rejections": []
+  },
+  {
+    "class": "time-delta-server-rejection",
+    "issue": "TODO: link the filed issue (fix: #10340)",
+    "name": "the #10340 E2E pending-delta shape",
+    "steps": [
+      { "d": "A", "a": ["track", "t1", 3000] },
+      { "d": "C", "a": ["track", "t1", 5000] },
+      { "d": "B", "a": ["renameTask", "t1", "B2"], "s": 1 },
+      { "d": "A", "s": 1 },
+      { "d": "C", "s": 1 }
+    ],
+    "failures": [],
+    "rejections": []
+  },
+  {
+    "class": "time-delta-server-rejection",
+    "issue": "TODO: link the filed issue (fix: #10340)",
+    "name": "the #10340 E2E pending-rename shape",
+    "steps": [
+      { "d": "B", "a": ["renameTask", "t1", "B0"] },
+      { "d": "C", "a": ["track", "t1", 5000] },
+      { "d": "A", "a": ["track", "t1", 3000], "s": 1 },
+      { "d": "B", "s": 1 },
+      { "d": "C", "s": 1 }
+    ],
+    "failures": [],
+    "rejections": []
+  },
+  {
+    "class": "remote-win-keeps-local-edit",
+    "issue": "TODO: link the filed issue",
+    "name": "a note content edit that loses to an unpin stays on its device only",
+    "steps": [
+      { "d": "C", "a": ["editNote", "n3", "content", "C17"] },
+      { "d": "B", "a": ["editNote", "n3", "isPinnedToToday", false] }
+    ],
+    "failures": [],
+    "rejections": []
+  },
+  {
+    "class": "remote-win-keeps-local-edit",
+    "issue": "TODO: link the filed issue",
+    "name": "a habit rename that loses to a count stays on its device only",
+    "steps": [
+      { "d": "C", "a": ["editHabit", "COFFEE_COUNTER", "title", "C24"] },
+      { "d": "A", "a": ["countHabit", "COFFEE_COUNTER"] }
+    ],
+    "failures": [],
+    "rejections": []
+  },
+  {
+    "class": "remote-win-keeps-local-edit",
+    "issue": "TODO: link the filed issue",
+    "name": "a task rename that loses to tracking stays on its device only",
+    "steps": [
+      { "d": "C", "a": ["addTask", "t13", "P"], "s": 1 },
+      { "d": "A", "s": 1 },
+      { "d": "C", "a": ["renameTask", "t13", "C18"] },
+      { "d": "A", "a": ["track", "t13", 2000] }
+    ],
+    "failures": [],
+    "rejections": []
+  },
+  {
+    "class": "auto-plan-blocks-delta-merge",
+    "issue": "TODO: link the filed issue",
+    "name": "two devices tracking one unscheduled task lose one device's time",
+    "steps": [
+      { "d": "B", "a": ["track", "t3", 3000] },
+      { "d": "A", "a": ["track", "t3", 2000] }
+    ],
+    "failures": [],
+    "rejections": []
+  },
+  {
+    "class": "whole-entity-lww-drops-fields",
+    "issue": "TODO: link the filed issue",
+    "name": "a habit count is lost to a concurrent rename",
+    "steps": [
+      { "d": "A", "a": ["countHabit", "COFFEE_COUNTER"] },
+      { "d": "C", "a": ["editHabit", "COFFEE_COUNTER", "title", "C26"] }
+    ],
+    "failures": [],
+    "rejections": []
+  },
+  {
+    "class": "whole-entity-lww-drops-fields",
+    "issue": "TODO: link the filed issue",
+    "name": "a note lock is lost to a concurrent unpin",
+    "steps": [
+      { "d": "A", "a": ["editNote", "n3", "isLock", true] },
+      { "d": "B", "a": ["editNote", "n3", "isPinnedToToday", false] }
+    ],
+    "failures": [],
+    "rejections": []
+  },
+  {
+    "class": "whole-entity-lww-drops-fields",
+    "issue": "TODO: link the filed issue",
+    "name": "done status is lost when both devices also rename the task",
+    "steps": [
+      { "d": "A", "a": ["doneTask", "t2", true] },
+      { "d": "A", "a": ["renameTask", "t2", "A27"] },
+      { "d": "C", "a": ["renameTask", "t2", "C28"] }
+    ],
+    "failures": [],
+    "rejections": []
+  },
+  {
+    "class": "whole-entity-lww-drops-fields",
+    "issue": "TODO: link the filed issue",
+    "name": "tracked time is lost to a later concurrent rename",
+    "steps": [
+      { "d": "A", "a": ["renameTask", "t2", "A2"] },
+      { "d": "C", "a": ["renameTask", "t2", "C14"], "s": 1 },
+      { "d": "A", "a": ["track", "t2", 3000] },
+      { "d": "C", "a": ["renameTask", "t2", "C29"] }
+    ],
+    "failures": [],
+    "rejections": []
+  },
+  {
+    "class": "note-recreated-without-content",
+    "issue": "TODO: link the filed issue",
+    "name": "a note deleted on one device and locked on another comes back invalid",
+    "steps": [
+      { "d": "B", "a": ["deleteNote", "n1"] },
+      { "d": "C", "a": ["editNote", "n1", "isLock", true], "s": 1 }
+    ],
+    "failures": [],
+    "rejections": []
+  },
+  {
+    "class": "list-order-divergence",
+    "issue": "TODO: link the filed issue",
+    "name": "two devices adding a habit end with different habit orders",
+    "steps": [
+      { "d": "A", "a": ["addHabit", "h14"] },
+      { "d": "C", "a": ["addHabit", "h16"] }
+    ],
+    "failures": [],
+    "rejections": []
+  },
+  {
+    "class": "list-order-divergence",
+    "issue": "TODO: link the filed issue",
+    "name": "a task recreated after delete-vs-rename sits at different project positions",
+    "steps": [
+      { "d": "A", "a": ["deleteTask", "t3"] },
+      { "d": "C", "a": ["renameTask", "t3", "C29"] }
+    ],
+    "failures": [],
+    "rejections": []
+  }
+]

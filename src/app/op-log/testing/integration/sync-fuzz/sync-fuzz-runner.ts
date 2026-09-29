@@ -5,7 +5,11 @@ import { Project } from '../../../../features/project/project.model';
 import { SimpleCounter } from '../../../../features/simple-counter/simple-counter.model';
 import { Task } from '../../../../features/tasks/task.model';
 import { FULL_STATE_OP_TYPES } from '../../../core/operation.types';
-import { AppStateSnapshot } from '../../../backup/state-snapshot.service';
+import {
+  AppStateSnapshot,
+  StateSnapshotService,
+} from '../../../backup/state-snapshot.service';
+import { ValidateStateService } from '../../../validation/validate-state.service';
 import { OperationLogStoreService } from '../../../persistence/operation-log-store.service';
 import {
   executeIntent,
@@ -14,6 +18,7 @@ import {
   fuzzDay,
   generateIntent,
   Intent,
+  IntentWeights,
   SETUP_INTENTS,
   viewOf,
 } from './sync-fuzz-actions';
@@ -33,7 +38,11 @@ export interface FuzzFailure {
 export interface FuzzResult {
   steps: FuzzStep[];
   failures: FuzzFailure[];
+  /** Distinct server rejections, as `<errorCode> <actionType>`. */
+  rejections: string[];
   ms: number;
+  /** With `debug`: server rows, rejections and every device's op log. */
+  dump?: string[];
 }
 
 export interface FuzzOptions {
@@ -42,6 +51,9 @@ export interface FuzzOptions {
   stepCount?: number;
   /** Stops tolerated by the "no stops" oracle (signature prefixes). */
   knownStops?: readonly string[];
+  /** Intent mix for generated traces (default DEFAULT_WEIGHTS). */
+  weights?: IntentWeights;
+  debug?: boolean;
 }
 
 const DEVICES = ['A', 'B', 'C'];
@@ -107,23 +119,36 @@ const valueAt = (source: unknown, path: string[]): unknown =>
     source,
   );
 
-/** First differing path between two JSON-like values, or undefined if equal. */
-export const firstDiff = (a: unknown, b: unknown, path = ''): string | undefined => {
-  if (Object.is(a, b)) return undefined;
-  if (a && b && typeof a === 'object' && typeof b === 'object') {
-    if (Array.isArray(a) !== Array.isArray(b)) return path;
+/** The differing leaf paths of two JSON-like values, at most `limit`. */
+export const diffPaths = (
+  a: unknown,
+  b: unknown,
+  limit = 20,
+  path = '',
+  found: string[] = [],
+): string[] => {
+  if (found.length >= limit || Object.is(a, b)) return found;
+  if (
+    a &&
+    b &&
+    typeof a === 'object' &&
+    typeof b === 'object' &&
+    Array.isArray(a) === Array.isArray(b)
+  ) {
     const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
     for (const key of [...keys].sort()) {
-      const diff = firstDiff(
+      diffPaths(
         (a as Record<string, unknown>)[key],
         (b as Record<string, unknown>)[key],
+        limit,
         `${path}.${key}`,
+        found,
       );
-      if (diff !== undefined) return diff;
     }
-    return undefined;
+    return found;
   }
-  return path || '.';
+  found.push(path || '.');
+  return found;
 };
 
 /**
@@ -138,12 +163,14 @@ export const comparable = (state: unknown): unknown =>
 
 const shortJson = (value: unknown): string => JSON.stringify(value)?.slice(0, 160) ?? '';
 
-/** Strips the path of ids and indexes so it can classify a failure. */
+/** Strips the path of ids, indexes and days so it can classify a failure. */
 const pathSignature = (path: string): string =>
   path
     .split('.')
-    .slice(0, 4)
-    .map((part) => (/^\d+$|^[tnh]\d+$|^fuzzDev/.test(part) ? '*' : part))
+    .slice(0, 6)
+    .map((part) =>
+      /^\d+$|^[tnh]\d+$|^fuzzDev|^\d{4}-\d{2}-\d{2}$/.test(part) ? '*' : part,
+    )
     .join('.');
 
 export const runFuzz = async (options: FuzzOptions): Promise<FuzzResult> => {
@@ -208,6 +235,7 @@ export const runFuzz = async (options: FuzzOptions): Promise<FuzzResult> => {
           archive?.task.ids ?? [],
           `${name}${i}`,
           nextId,
+          options.weights,
         );
       });
       await runStep(
@@ -258,8 +286,7 @@ export const runFuzz = async (options: FuzzOptions): Promise<FuzzResult> => {
   const reference = await harness.syncedState(observer);
   for (const name of DEVICES) {
     const state = await harness.syncedState(deviceOf(name));
-    const diff = firstDiff(comparable(state), comparable(reference));
-    if (diff !== undefined) {
+    for (const diff of diffPaths(comparable(state), comparable(reference))) {
       const path = diff.slice(1).split('.');
       fail(
         `divergence:${pathSignature(diff)}`,
@@ -271,7 +298,63 @@ export const runFuzz = async (options: FuzzOptions): Promise<FuzzResult> => {
   }
 
   checkPreservation(reference, ledger, fail);
-  return { steps: executed, failures, ms: Math.round(performance.now() - started) };
+  return {
+    steps: executed,
+    failures,
+    rejections: [
+      ...new Set(harness.server.rejections.map((r) => `${r.errorCode} ${r.actionType}`)),
+    ].sort(),
+    ms: Math.round(performance.now() - started),
+    ...(options.debug ? { dump: await dumpRun(harness, [...devices.values()]) } : {}),
+  };
+};
+
+const entityOfOp = (op: {
+  entityType: string;
+  entityId?: string;
+  entityIds?: string[];
+}): string =>
+  `${op.entityType}:${op.entityIds?.length ? op.entityIds.join(',') : op.entityId}`;
+
+/** A compact picture of a run for triage: server log, rejections, op logs. */
+const dumpRun = async (
+  harness: SyncFuzzHarness,
+  devices: FuzzDevice[],
+): Promise<string[]> => {
+  const lines = harness.server.rows.map(
+    ({ serverSeq, op }) =>
+      `srv ${serverSeq} ${op.clientId} ${op.actionType} ${entityOfOp(op)} ` +
+      `${JSON.stringify(op.vectorClock)} ts+${op.timestamp % 1_000_000}`,
+  );
+  lines.push(...harness.server.rejections.map((r) => `rej ${JSON.stringify(r)}`));
+  lines.push(...harness.events.map((e) => `evt ${JSON.stringify(e)}`));
+  for (const device of devices) {
+    const validation = await harness.as(device, () =>
+      TestBed.inject(ValidateStateService).validateState(
+        TestBed.inject(StateSnapshotService).getStateSnapshot() as unknown as Record<
+          string,
+          unknown
+        >,
+      ),
+    );
+    if (!validation.isValid) {
+      lines.push(
+        `${device.name} INVALID ${validation.crossModelError ?? ''} ` +
+          shortJson(validation.typiaErrors).slice(0, 400),
+      );
+    }
+    const entries = await harness.as(device, () =>
+      TestBed.inject(OperationLogStoreService).getOpsAfterSeq(0),
+    );
+    for (const { seq, op, source, syncedAt, rejectedAt } of entries) {
+      lines.push(
+        `${device.name} ${seq} ${source} ${op.clientId} ${op.actionType} ${entityOfOp(op)} ` +
+          `${rejectedAt ? 'REJECTED' : syncedAt ? 'synced' : 'PENDING'} ` +
+          `${JSON.stringify(op.vectorClock)} ${shortJson(op.payload)}`,
+      );
+    }
+  }
+  return lines;
 };
 
 interface EntityMap<T> {

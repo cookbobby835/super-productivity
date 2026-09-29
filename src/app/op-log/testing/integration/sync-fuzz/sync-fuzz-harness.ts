@@ -69,6 +69,7 @@ import {
 import { appStateFeature } from '../../../../root-store/app-state/app-state.reducer';
 import { META_REDUCERS } from '../../../../root-store/meta/meta-reducer-registry';
 import { ArchiveOperationHandlerEffects } from '../../../apply/archive-operation-handler.effects';
+import { ArchiveOperationHandler } from '../../../apply/archive-operation-handler.service';
 import { HydrationStateService } from '../../../apply/hydration-state.service';
 import {
   AppStateSnapshot,
@@ -89,6 +90,7 @@ import { runDbUpgrade } from '../../../persistence/db-upgrade';
 import { IndexedDbOpLogAdapter } from '../../../persistence/indexed-db-op-log-adapter';
 import { OpLogDbAdapter } from '../../../persistence/op-log-db-adapter';
 import { OP_LOG_DB_ADAPTER_FACTORY } from '../../../persistence/op-log-db-adapter.token';
+import { OperationLogCompactionService } from '../../../persistence/operation-log-compaction.service';
 import { OperationLogStoreService } from '../../../persistence/operation-log-store.service';
 import { TabSeqFrontierService } from '../../../persistence/tab-seq-frontier.service';
 import { ImmediateUploadService } from '../../../sync/immediate-upload.service';
@@ -379,6 +381,11 @@ export class SyncFuzzHarness {
     setOperationCaptureService(TestBed.inject(OperationCaptureService));
     // Effects subscribe when the store is created.
     TestBed.inject(OperationLogEffects);
+    // Local archive writes (ArchiveOperationHandlerEffects) and triggered
+    // compaction run detached from the dispatch; a step must not end, and the
+    // device swap out, before they wrote to this device's database.
+    this._trackInFlight(TestBed.inject(ArchiveOperationHandler), 'handleOperation');
+    this._trackInFlight(TestBed.inject(OperationLogCompactionService), 'compact');
     this._pristineState = await firstValueFrom(TestBed.inject(Store));
     this._pristineFields = new Map();
     for (const [token, names] of DEVICE_FIELDS) {
@@ -455,8 +462,24 @@ export class SyncFuzzHarness {
     return firstValueFrom(TestBed.inject(Store)) as Promise<Record<string, unknown>>;
   }
 
+  private readonly _inFlight = new Set<Promise<unknown>>();
+
+  private _trackInFlight<T extends object>(instance: T, method: keyof T & string): void {
+    const target = instance as unknown as Record<string, (...a: unknown[]) => unknown>;
+    const original = target[method].bind(instance);
+    target[method] = (...args: unknown[]) => {
+      const result = Promise.resolve(original(...args));
+      this._inFlight.add(result);
+      void result.finally(() => this._inFlight.delete(result)).catch(() => undefined);
+      return result;
+    };
+  }
+
   private async _settle(): Promise<void> {
-    await TestBed.inject(OperationWriteFlushService).flushPendingWrites();
+    do {
+      await TestBed.inject(OperationWriteFlushService).flushPendingWrites();
+      await Promise.allSettled([...this._inFlight]);
+    } while (this._inFlight.size > 0);
     if (getDeferredActions().length > 0) {
       await TestBed.inject(OperationLogEffects).processDeferredActions();
     }
