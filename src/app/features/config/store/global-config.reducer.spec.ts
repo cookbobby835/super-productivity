@@ -1148,11 +1148,12 @@ describe('GlobalConfigReducer', () => {
         sectionKey: 'sync',
         sectionCfg: { isUseSplitSyncFiles: true },
       });
-
-      const result = globalConfigReducer(oldState, {
+      const remoteReplayAction = {
         ...remoteAction,
         meta: { ...remoteAction.meta, isRemote: true, isApplyingFromOtherClient: true },
-      });
+      };
+
+      const result = globalConfigReducer(oldState, remoteReplayAction);
 
       expect(result.sync.isUseSplitSyncFiles).toBe(false);
     });
