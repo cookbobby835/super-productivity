@@ -1,9 +1,10 @@
-import type { Page } from '@playwright/test';
+import type { Browser, Page } from '@playwright/test';
 import { writeFile } from 'node:fs/promises';
 import type { CompactOperationLogEntry } from '../../../src/app/op-log/persistence/compact/compact-operation.types';
 import { expect, test } from '../../fixtures/supersync.fixture';
 import { NotePage } from '../../pages/note.page';
 import { TagPage } from '../../pages/tag.page';
+import { serveReleasedClientAssets } from '../../utils/released-client-assets';
 import {
   closeClient,
   createSimulatedClient,
@@ -22,7 +23,8 @@ import { waitForAppReady } from '../../utils/waits';
  * through the store. The strict sync helper fails on the whole-dataset
  * "Sync: Conflicting Data" dialog and never picks Keep local or Keep remote.
  * Either device's order may win; both devices must converge and the edit and
- * the unrelated work of both devices must survive.
+ * the unrelated work of both devices must survive. Today membership against a
+ * tag order stays behind the safety stop, which must lose nothing.
  */
 type Row = CompactOperationLogEntry;
 type Entity = Record<string, unknown>;
@@ -446,16 +448,226 @@ const habitSeeds = (ids: string[]): Record<string, unknown>[] =>
   );
 
 // ---------------------------------------------------------------------------
+// Crossing harness
+// ---------------------------------------------------------------------------
+
+interface Harness {
+  clients: SimulatedE2EClient[];
+  logs: string[];
+  evidence: Record<string, unknown>;
+}
+interface RunFixtures {
+  browser: Browser;
+  baseURL: string | undefined;
+  testRunId: string;
+}
+type SyncConfig = ReturnType<typeof getSuperSyncConfig>;
+
+const orderCode = (list: ListName): string =>
+  list === 'sections' ? 'S4' : list === 'habits' ? 'SM' : 'NO';
+const editCode = (list: ListName): string =>
+  list === 'sections' ? 'S3' : list === 'habits' ? 'SU' : 'NU';
+
+const join = async (
+  { browser, testRunId }: RunFixtures,
+  harness: Harness,
+  config: SyncConfig,
+  clientName: string,
+  url: string,
+  released = false,
+): Promise<SimulatedE2EClient> => {
+  const client = await createSimulatedClient(
+    browser,
+    url,
+    clientName,
+    testRunId,
+    released ? { serviceWorkers: 'block' } : {},
+  );
+  harness.clients.push(client);
+  client.page.on('console', (m) => harness.logs.push(`${clientName}: ${m.text()}`));
+  await client.sync.setupSuperSync(config);
+  await client.page.addInitScript(() => {
+    const flags = window as unknown as Record<string, unknown>;
+    flags.__SP_E2E_BLOCK_AUTO_SYNC = true;
+    flags.__SP_E2E_BLOCK_IMMEDIATE_UPLOAD = true;
+    flags.__SP_E2E_BLOCK_WS_DOWNLOAD = true;
+  });
+  return client;
+};
+
+const fixtureIds = (list: ListName, testRunId: string): string[] =>
+  (list === 'sections'
+    ? ['Alpha', 'Beta', 'Untouched', 'Foreign']
+    : list === 'habits'
+      ? ['target', 'disabled', 'sibling', 'untouched']
+      : ['target', 'sibling', 'witness', 'today-only']
+  ).map((id) => `${id}-${testRunId}`);
+
+const seedsFor = (
+  list: ListName,
+  ids: string[],
+  edit: EditName,
+): Record<string, unknown>[] =>
+  list === 'sections'
+    ? sectionSeeds(ids, edit)
+    : list === 'habits'
+      ? habitSeeds(ids)
+      : noteSeeds(ids, edit);
+
+/** Performs one side of the crossing in the real UI and returns its pending op. */
+const perform = async (
+  client: SimulatedE2EClient,
+  isOrder: boolean,
+  { list, edit }: Crossing,
+  ids: string[],
+  tagId: string,
+): Promise<Row['op']> => {
+  if (isOrder) {
+    if (list === 'sections') await dragSections(client.page, ids);
+    else if (list === 'habits') await dragHabits(client.page);
+    else await dragNotes(client.page, noteRoute(list, tagId));
+  } else if (list === 'sections') {
+    await toggleSection(client.page, ids[0]);
+  } else if (list === 'habits') {
+    await editHabitSettings(client.page, ids[0], edit);
+  } else {
+    await editNote(client.page, ids[0], edit);
+  }
+  const code = isOrder ? orderCode(list) : editCode(list);
+  await expect
+    .poll(async () => pending(await rows(client.page)).filter((r) => r.op.a === code))
+    .toHaveLength(1);
+  return pending(await rows(client.page)).find((r) => r.op.a === code)!.op;
+};
+
+interface CrossingRun {
+  a: SimulatedE2EClient;
+  b: SimulatedE2EClient;
+  ids: string[];
+  before: Snapshot;
+  edited: Snapshot;
+  reordered: Snapshot;
+  order: Row['op'];
+  fullStateBefore: Set<string>;
+  config: SyncConfig;
+}
+
+/**
+ * Seeds A, joins B and performs both real UI actions in timestamp order. The
+ * order is pending on A when `pendingOrder`, else the edit is; B uploads first.
+ */
+const runCrossing = async (
+  fixtures: RunFixtures,
+  harness: Harness,
+  crossing: Crossing,
+  pendingOrder: boolean,
+  incomingNewer: boolean,
+): Promise<CrossingRun> => {
+  const { list, edit } = crossing;
+  const { testRunId } = fixtures;
+  const config = getSuperSyncConfig(await createTestUser(testRunId));
+  const a = await join(fixtures, harness, config, 'A', fixtures.baseURL!);
+  const ids = fixtureIds(list, testRunId);
+  let tagId = '';
+  if (list === 'tag notes') {
+    // Any user tag view lists note.todayOrder in its notes panel.
+    const tagTitle = `Reorder tag ${testRunId}`;
+    await new TagPage(a.page).createTag(tagTitle);
+    const findTag = async (): Promise<string | undefined> => {
+      const { tag } = await readSlices(a.page);
+      return tag.ids.find((id) => tag.entities[id]?.title === tagTitle);
+    };
+    await expect.poll(findTag).toBeTruthy();
+    tagId = (await findTag())!;
+  }
+  await dispatch(a.page, seedsFor(list, ids, edit));
+  await sync(a);
+  const b = await join(fixtures, harness, config, 'B', fixtures.baseURL!);
+  await sync(b);
+  await sync(a);
+  const before = await snapshot(a.page, list, ids);
+  expect(await snapshot(b.page, list, ids)).toEqual(before);
+  const fullStateBefore = new Set([
+    ...fullStateOps(await rows(a.page)),
+    ...fullStateOps(await rows(b.page)),
+  ]);
+  // Unrelated work on both devices must survive the crossing.
+  await a.workView.addTask(`local witness ${testRunId}`);
+  await b.workView.addTask(`remote witness ${testRunId}`);
+
+  const orderClient = pendingOrder ? a : b;
+  const editClient = pendingOrder ? b : a;
+  // Change real UI action order, not timestamps or stored rows.
+  const ops = new Map<SimulatedE2EClient, Row['op']>();
+  for (const client of incomingNewer ? [a, b] : [b, a])
+    ops.set(client, await perform(client, client === orderClient, crossing, ids, tagId));
+  const order = ops.get(orderClient)!;
+  const update = ops.get(editClient)!;
+  expect(order).toMatchObject({ o: 'MOV', d: order.ds![0] });
+  expect(update).toMatchObject({ o: 'UPD', d: ids[0], ds: [ids[0]] });
+  // The edited entity is a declared, non-primary id of the reorder.
+  expect(order.ds).toContain(ids[0]);
+  expect(order.ds!.length).toBeGreaterThan(1);
+  if (list === 'tag notes') {
+    expect(order.p).toMatchObject({
+      actionPayload: { activeContextType: 'TAG', activeContextId: tagId },
+    });
+  }
+  const local = pendingOrder ? order : update;
+  const remote = pendingOrder ? update : order;
+  expect(remote.t > local.t).toBe(incomingNewer);
+  const keys = new Set([...Object.keys(local.v), ...Object.keys(remote.v)]);
+  expect([...keys].some((k) => (local.v[k] || 0) > (remote.v[k] || 0))).toBe(true);
+  expect([...keys].some((k) => (local.v[k] || 0) < (remote.v[k] || 0))).toBe(true);
+  const edited = await snapshot(editClient.page, list, ids);
+  const reordered = await snapshot(orderClient.page, list, ids);
+  expect(edited.entities[ids[0]]).not.toEqual(before.entities[ids[0]]);
+  harness.evidence.beforeCrossing = { order, update, edited, reordered };
+  return { a, b, ids, before, edited, reordered, order, fullStateBefore, config };
+};
+
+/** Records the stop's diagnostics; never answers the Conflicting Data dialog. */
+const recordStop = async (
+  client: SimulatedE2EClient,
+  harness: Harness,
+): Promise<void> => {
+  harness.evidence.safetyStop = harness.logs.filter(
+    (l) =>
+      l.startsWith(`${client.clientName}: `) &&
+      l.includes('SYNC_MULTI_ENTITY_UNSUPPORTED'),
+  );
+  // The manual-sync dialog can follow the error icon; record it, never answer it.
+  await client.sync.conflictDialog
+    .waitFor({ state: 'visible', timeout: 5000 })
+    .catch(() => undefined);
+  harness.evidence.dialog = (await client.sync.conflictDialog.isVisible())
+    ? await client.sync.conflictDialog.innerText()
+    : null;
+};
+
+const withHarness = async (
+  evidence: Record<string, unknown>,
+  outputPath: string,
+  body: (harness: Harness) => Promise<void>,
+): Promise<void> => {
+  const harness: Harness = { clients: [], logs: [], evidence };
+  try {
+    await body(harness);
+  } finally {
+    await writeFile(outputPath, JSON.stringify(harness.evidence, null, 2));
+    for (const client of harness.clients) await closeClient(client);
+  }
+};
+
+// ---------------------------------------------------------------------------
 // Matrix
 // ---------------------------------------------------------------------------
 
 const crossings: Crossing[] = [
-  // 1. Pin/unpin write todayOrder, not project.noteIds; unpin is the
-  //    membership change the Today reorder already treats as commuting.
+  // 1. Pin/unpin write note.todayOrder, not the project list the order writes.
   { list: 'project notes', edit: 'pin' },
   { list: 'project notes', edit: 'unpin' },
-  { list: 'Today notes', edit: 'unpin' },
-  // 2. In-place note fields.
+  // 2. In-place note fields, in every context.
   { list: 'project notes', edit: 'lock' },
   { list: 'Today notes', edit: 'unlock' },
   // 3. Section expansion is an in-place field.
@@ -468,11 +680,6 @@ const crossings: Crossing[] = [
   { list: 'tag notes', edit: 'content' },
 ];
 
-const orderCode = (list: ListName): string =>
-  list === 'sections' ? 'S4' : list === 'habits' ? 'SM' : 'NO';
-const editCode = (list: ListName): string =>
-  list === 'sections' ? 'S3' : list === 'habits' ? 'SU' : 'NU';
-
 for (const crossing of crossings) {
   for (const pendingOrder of [true, false]) {
     for (const incomingNewer of [true, false]) {
@@ -482,212 +689,319 @@ for (const crossing of crossings) {
         ` / incoming-${incomingNewer ? 'newer' : 'older'}`;
       test(name, async ({ browser, baseURL, testRunId }, testInfo) => {
         test.setTimeout(240000);
-        const clients: SimulatedE2EClient[] = [];
-        const logs: string[] = [];
-        const evidence: Record<string, unknown> = {
-          crossing,
-          pendingOrder,
-          incomingNewer,
-        };
-        const { list, edit } = crossing;
-        try {
-          const config = getSuperSyncConfig(await createTestUser(testRunId));
-          const makeClient = async (clientName: string): Promise<SimulatedE2EClient> => {
-            const client = await createSimulatedClient(
-              browser,
-              baseURL!,
-              clientName,
-              testRunId,
-            );
-            clients.push(client);
-            client.page.on('console', (m) => logs.push(`${clientName}: ${m.text()}`));
-            await client.sync.setupSuperSync(config);
-            await client.page.addInitScript(() => {
-              const flags = window as unknown as Record<string, unknown>;
-              flags.__SP_E2E_BLOCK_AUTO_SYNC = true;
-              flags.__SP_E2E_BLOCK_IMMEDIATE_UPLOAD = true;
-              flags.__SP_E2E_BLOCK_WS_DOWNLOAD = true;
+        const { list } = crossing;
+        const evidence = { crossing, pendingOrder, incomingNewer };
+        await withHarness(
+          evidence,
+          testInfo.outputPath('evidence.json'),
+          async (harness) => {
+            const fixtures = { browser, baseURL, testRunId };
+            const { a, b, ids, before, edited, fullStateBefore, config } =
+              await runCrossing(fixtures, harness, crossing, pendingOrder, incomingNewer);
+
+            // B uploads first; A resolves while its own crossing op is pending.
+            await sync(b);
+            const outcome = await syncOutcome(a);
+            harness.evidence.outcome = outcome;
+            if (outcome !== 'in-sync') await recordStop(a, harness);
+            expect(
+              outcome,
+              `must sync without the safety stop: ${JSON.stringify(harness.evidence.safetyStop ?? [])}`,
+            ).toBe('in-sync');
+            await sync(b);
+            await sync(a);
+
+            const final = await snapshot(a.page, list, ids);
+            expect(await snapshot(b.page, list, ids)).toEqual(final);
+            // The edit survives on the entity, every other entity is untouched.
+            expect(final.entities).toEqual({
+              ...before.entities,
+              [ids[0]]: edited.entities[ids[0]],
             });
-            return client;
-          };
-
-          const a = await makeClient('A');
-          const ids = (
-            list === 'sections'
-              ? ['Alpha', 'Beta', 'Untouched', 'Foreign']
-              : list === 'habits'
-                ? ['target', 'disabled', 'sibling', 'untouched']
-                : ['target', 'sibling', 'witness', 'today-only']
-          ).map((id) => `${id}-${testRunId}`);
-          let tagId = '';
-          if (list === 'tag notes') {
-            // Any user tag view lists note.todayOrder in its notes panel.
-            const tagTitle = `Reorder tag ${testRunId}`;
-            await new TagPage(a.page).createTag(tagTitle);
-            const findTag = async (): Promise<string | undefined> => {
-              const { tag } = await readSlices(a.page);
-              return tag.ids.find((id) => tag.entities[id]?.title === tagTitle);
-            };
-            await expect.poll(findTag).toBeTruthy();
-            tagId = (await findTag())!;
-          }
-          await dispatch(
-            a.page,
-            list === 'sections'
-              ? sectionSeeds(ids, edit)
-              : list === 'habits'
-                ? habitSeeds(ids)
-                : noteSeeds(ids, edit),
-          );
-          await sync(a);
-          const b = await makeClient('B');
-          await sync(b);
-          await sync(a);
-          const before = await snapshot(a.page, list, ids);
-          expect(await snapshot(b.page, list, ids)).toEqual(before);
-          const fullStateBefore = new Set([
-            ...fullStateOps(await rows(a.page)),
-            ...fullStateOps(await rows(b.page)),
-          ]);
-          // Unrelated work on both devices must survive the crossing.
-          await a.workView.addTask(`local witness ${testRunId}`);
-          await b.workView.addTask(`remote witness ${testRunId}`);
-
-          const orderClient = pendingOrder ? a : b;
-          const editClient = pendingOrder ? b : a;
-          const perform = async (client: SimulatedE2EClient): Promise<void> => {
-            const isOrder = client === orderClient;
-            if (isOrder) {
-              if (list === 'sections') await dragSections(client.page, ids);
-              else if (list === 'habits') await dragHabits(client.page);
-              else await dragNotes(client.page, noteRoute(list, tagId));
-            } else if (list === 'sections') {
-              await toggleSection(client.page, ids[0]);
-            } else if (list === 'habits') {
-              await editHabitSettings(client.page, ids[0], edit);
+            // One converged, unique order over the same members (either winner).
+            expect(new Set(final.order).size).toBe(final.order.length);
+            expect([...final.order].sort()).toEqual([...before.order].sort());
+            if (list.endsWith('notes')) {
+              expect(new Set(final.other).size).toBe(final.other.length);
+              expect([...final.other].sort()).toEqual(
+                [...(list === 'project notes' ? edited.other : before.other)].sort(),
+              );
             } else {
-              await editNote(client.page, ids[0], edit);
+              // Foreign-context / disabled slots keep their absolute position.
+              const fixed = ids[list === 'sections' ? 3 : 1];
+              expect(final.other.indexOf(fixed)).toBe(before.other.indexOf(fixed));
             }
-            const code = isOrder ? orderCode(list) : editCode(list);
-            await expect
-              .poll(async () =>
-                pending(await rows(client.page)).filter((r) => r.op.a === code),
-              )
-              .toHaveLength(1);
-          };
-          // Change real UI action order, not timestamps or stored rows.
-          await perform(incomingNewer ? a : b);
-          await perform(incomingNewer ? b : a);
-
-          const order = pending(await rows(orderClient.page)).find(
-            (r) => r.op.a === orderCode(list),
-          )!.op;
-          const update = pending(await rows(editClient.page)).find(
-            (r) => r.op.a === editCode(list),
-          )!.op;
-          expect(order).toMatchObject({ o: 'MOV', d: order.ds![0] });
-          expect(update).toMatchObject({ o: 'UPD', d: ids[0], ds: [ids[0]] });
-          // The edited entity is a declared, non-primary id of the reorder.
-          expect(order.ds).toContain(ids[0]);
-          expect(order.ds!.length).toBeGreaterThan(1);
-          if (list === 'tag notes') {
-            expect(order.p).toMatchObject({
-              actionPayload: { activeContextType: 'TAG', activeContextId: tagId },
-            });
-          }
-          const local = pendingOrder ? order : update;
-          const remote = pendingOrder ? update : order;
-          expect(remote.t > local.t).toBe(incomingNewer);
-          const keys = new Set([...Object.keys(local.v), ...Object.keys(remote.v)]);
-          expect([...keys].some((k) => (local.v[k] || 0) > (remote.v[k] || 0))).toBe(
-            true,
-          );
-          expect([...keys].some((k) => (local.v[k] || 0) < (remote.v[k] || 0))).toBe(
-            true,
-          );
-          const edited = await snapshot(editClient.page, list, ids);
-          const reordered = await snapshot(orderClient.page, list, ids);
-          expect(edited.entities[ids[0]]).not.toEqual(before.entities[ids[0]]);
-          evidence.beforeCrossing = { order, update, edited, reordered };
-
-          // B uploads first; A resolves while its own crossing op is pending.
-          await sync(b);
-          const outcome = await syncOutcome(a);
-          evidence.outcome = outcome;
-          if (outcome !== 'in-sync') {
-            evidence.safetyStop = logs.filter((l) =>
-              l.includes('SYNC_MULTI_ENTITY_UNSUPPORTED'),
+            if (list === 'habits') expect(final.entities[ids[0]].type).toBe('StopWatch');
+            expect(final.tasks).toEqual(
+              expect.arrayContaining([
+                expect.stringContaining(`local witness ${testRunId}`),
+                expect.stringContaining(`remote witness ${testRunId}`),
+              ]),
             );
-            // The manual-sync dialog can follow the error icon; record it, never answer it.
-            await a.sync.conflictDialog
-              .waitFor({ state: 'visible', timeout: 5000 })
-              .catch(() => undefined);
-            evidence.dialog = (await a.sync.conflictDialog.isVisible())
-              ? await a.sync.conflictDialog.innerText()
-              : null;
-          }
-          expect(
-            outcome,
-            `must sync without the safety stop: ${JSON.stringify(evidence.safetyStop ?? [])}`,
-          ).toBe('in-sync');
-          await sync(b);
-          await sync(a);
 
-          const final = await snapshot(a.page, list, ids);
-          expect(await snapshot(b.page, list, ids)).toEqual(final);
-          // The edit survives on the entity, every other entity is untouched.
-          expect(final.entities).toEqual({
-            ...before.entities,
-            [ids[0]]: edited.entities[ids[0]],
-          });
-          // One converged, unique order over the same members (either winner).
-          expect(new Set(final.order).size).toBe(final.order.length);
-          expect([...final.order].sort()).toEqual(
-            [...(list === 'Today notes' ? edited.order : before.order)].sort(),
-          );
-          if (list.endsWith('notes')) {
-            expect(new Set(final.other).size).toBe(final.other.length);
-            expect([...final.other].sort()).toEqual(
-              [...(list === 'project notes' ? edited.other : before.other)].sort(),
-            );
-          } else {
-            // Foreign-context / disabled slots keep their absolute position.
-            const fixed = ids[list === 'sections' ? 3 : 1];
-            expect(final.other.indexOf(fixed)).toBe(before.other.indexOf(fixed));
-          }
-          if (list === 'habits') expect(final.entities[ids[0]].type).toBe('StopWatch');
-          expect(final.tasks).toEqual(
-            expect.arrayContaining([
-              expect.stringContaining(`local witness ${testRunId}`),
-              expect.stringContaining(`remote witness ${testRunId}`),
-            ]),
-          );
-
-          for (const client of [a, b]) {
-            const entries = await rows(client.page);
-            expect(pending(entries)).toEqual([]);
-            expect(fullStateOps(entries).every((id) => fullStateBefore.has(id))).toBe(
-              true,
-            );
-            await client.page.reload();
-            await waitForAppReady(client.page, { ensureRoute: false });
-            expect(await snapshot(client.page, list, ids)).toEqual(final);
-            await sync(client);
-          }
-          const fresh = await makeClient('Fresh');
-          await sync(fresh);
-          expect(await snapshot(fresh.page, list, ids)).toEqual(final);
-          expect(
-            fullStateOps(await rows(fresh.page)).every((id) => fullStateBefore.has(id)),
-          ).toBe(true);
-        } finally {
-          await writeFile(
-            testInfo.outputPath('evidence.json'),
-            JSON.stringify(evidence, null, 2),
-          );
-          for (const client of clients) await closeClient(client);
-        }
+            for (const client of [a, b]) {
+              const entries = await rows(client.page);
+              expect(pending(entries)).toEqual([]);
+              expect(fullStateOps(entries).every((id) => fullStateBefore.has(id))).toBe(
+                true,
+              );
+              await client.page.reload();
+              await waitForAppReady(client.page, { ensureRoute: false });
+              expect(await snapshot(client.page, list, ids)).toEqual(final);
+              await sync(client);
+            }
+            const fresh = await join(fixtures, harness, config, 'Fresh', baseURL!);
+            await sync(fresh);
+            expect(await snapshot(fresh.page, list, ids)).toEqual(final);
+            expect(
+              fullStateOps(await rows(fresh.page)).every((id) => fullStateBefore.has(id)),
+            ).toBe(true);
+          },
+        );
       });
     }
   }
 }
+
+// A tag order carries note.todayOrder, which released reducers overwrite with
+// it; Today membership against it stays behind the safety stop (#10342).
+test('@supersync reorder rule: Today notes vs unpin keeps the stop, nothing lost', async ({
+  browser,
+  baseURL,
+  testRunId,
+}, testInfo) => {
+  test.setTimeout(240000);
+  const crossing: Crossing = { list: 'Today notes', edit: 'unpin' };
+  await withHarness(
+    { crossing },
+    testInfo.outputPath('evidence.json'),
+    async (harness) => {
+      const { a, b, ids, edited, reordered, order } = await runCrossing(
+        { browser, baseURL, testRunId },
+        harness,
+        crossing,
+        true,
+        true,
+      );
+      await sync(b);
+      const outcome = await syncOutcome(a);
+      harness.evidence.outcome = outcome;
+      await recordStop(a, harness);
+      expect(outcome).not.toBe('in-sync');
+      expect(harness.evidence.safetyStop).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining('side=local actionType=[Note] Update Note Order'),
+        ]),
+      );
+      // A keeps its pending order and its own state; B keeps the synced unpin.
+      expect(pending(await rows(a.page)).map((r) => r.op.id)).toContain(order.id);
+      const lists = ({ order: o, other, entities }: Snapshot): object => ({
+        order: o,
+        other,
+        entities,
+      });
+      expect(lists(await snapshot(a.page, crossing.list, ids))).toEqual(lists(reordered));
+      expect(lists(await snapshot(b.page, crossing.list, ids))).toEqual(lists(edited));
+      expect(pending(await rows(b.page))).toEqual([]);
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Released receivers and producers (unmodified v18.15–v19.1 bundle)
+// ---------------------------------------------------------------------------
+
+/** Note ids as the released notes panel renders them, duplicates included. */
+const renderedNotes = async (page: Page, route: string): Promise<string[]> => {
+  await page.goto(`/#/${route}/tasks`);
+  await new NotePage(page).ensureNotesVisible();
+  await expect(page.locator('notes .notes')).toBeVisible();
+  return page
+    .locator('notes [cdkdrag]')
+    .evaluateAll((nodes) => nodes.map((node) => node.id.slice(2)));
+};
+
+test.describe('@supersync reorder rule: released clients', () => {
+  test.describe.configure({ mode: 'serial' });
+  const oldAssets = process.env.COMPAT_OLD_ASSETS;
+  test.skip(!oldAssets, 'Set COMPAT_OLD_ASSETS to the unmodified released assets');
+  let assets: Awaited<ReturnType<typeof serveReleasedClientAssets>>;
+  test.beforeAll(async () => {
+    // A free port: other released suites may serve their bundle concurrently.
+    assets = await serveReleasedClientAssets({ old: oldAssets!, new: oldAssets! }, 0);
+  });
+  test.afterAll(async () => assets?.close());
+
+  for (const releasedPins of [false, true]) {
+    test(
+      releasedPins
+        ? 'released pin uploads first, current reissues its project order'
+        : 'current reissues a pin over a project order, released consumes it',
+      async ({ browser, baseURL, testRunId }, testInfo) => {
+        test.setTimeout(240000);
+        await withHarness(
+          { releasedPins },
+          testInfo.outputPath('evidence.json'),
+          async (harness) => {
+            const fixtures = { browser, baseURL, testRunId };
+            const config = getSuperSyncConfig(await createTestUser(testRunId));
+            const ids = fixtureIds('project notes', testRunId);
+            const current = await join(fixtures, harness, config, 'A', baseURL!);
+            await dispatch(current.page, noteSeeds(ids, 'pin'));
+            await sync(current);
+            const released = await join(
+              fixtures,
+              harness,
+              config,
+              'Released',
+              assets.url,
+              true,
+            );
+            await sync(released);
+            const other = releasedPins
+              ? released
+              : await join(fixtures, harness, config, 'B', baseURL!);
+            await sync(other);
+            await sync(current);
+            const versions: (string | null)[] = [];
+            released.page.on('request', (request) => {
+              if (request.method() === 'GET' && request.url().includes('/api/sync/ops?'))
+                versions.push(new URL(request.url()).searchParams.get('appVersion'));
+            });
+            const route = `project/${PROJECT}`;
+            expect((await renderedNotes(released.page, route)).sort()).toEqual(
+              ids.slice(0, 3).sort(),
+            );
+
+            // The released UI pins in place; the current UI drags or pins.
+            if (releasedPins) {
+              await perform(
+                current,
+                true,
+                { list: 'project notes', edit: 'pin' },
+                ids,
+                '',
+              );
+              const note = released.page.locator(`#n-${ids[0]}`);
+              await note.hover();
+              await note.locator('button:has(mat-icon:text-is("wb_sunny"))').click();
+              await expect
+                .poll(async () => pending(await rows(released.page)).map((r) => r.op.a))
+                .toContain('NU');
+            } else {
+              await perform(
+                current,
+                false,
+                { list: 'project notes', edit: 'pin' },
+                ids,
+                '',
+              );
+              await perform(other, true, { list: 'project notes', edit: 'pin' }, ids, '');
+            }
+            await sync(other);
+            await sync(current);
+            await sync(other);
+            await sync(released);
+            await sync(current);
+
+            const final = await snapshot(current.page, 'project notes', ids);
+            if (!releasedPins)
+              expect(await snapshot(other.page, 'project notes', ids)).toEqual(final);
+            expect(final.entities[ids[0]].isPinnedToToday).toBe(true);
+            expect(final.other.filter((id) => id === ids[0])).toHaveLength(1);
+            const rejected = (await rows(current.page)).filter(
+              (r) => r.source === 'local' && !!r.rejectedAt,
+            );
+            expect(rejected.map((r) => r.op.a)).toEqual([releasedPins ? 'NO' : 'NU']);
+            for (const reload of [false, true]) {
+              if (reload) {
+                await released.page.reload();
+                await waitForAppReady(released.page, { ensureRoute: false });
+                await sync(released);
+              }
+              expect(await renderedNotes(released.page, route)).toEqual(final.order);
+              const today = await renderedNotes(released.page, 'tag/TODAY');
+              expect(today.filter((id) => ids.includes(id))).toEqual(final.other);
+            }
+            expect(versions).toContain('19.1.0');
+            for (const client of harness.clients)
+              expect(pending(await rows(client.page))).toEqual([]);
+          },
+        );
+      },
+    );
+  }
+
+  test('current reissues habit settings over a habit order, released keeps the type', async ({
+    browser,
+    baseURL,
+    testRunId,
+  }, testInfo) => {
+    test.setTimeout(240000);
+    await withHarness({}, testInfo.outputPath('evidence.json'), async (harness) => {
+      const fixtures = { browser, baseURL, testRunId };
+      const config = getSuperSyncConfig(await createTestUser(testRunId));
+      const ids = fixtureIds('habits', testRunId);
+      const current = await join(fixtures, harness, config, 'A', baseURL!);
+      const today = await current.page.evaluate(() => {
+        const d = new Date();
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      });
+      const seeds = habitSeeds(ids);
+      // Two tracked minutes render as "2m" only while the habit is a StopWatch.
+      (seeds[0].simpleCounter as Record<string, unknown>).countOnDay = Object.fromEntries(
+        [[today, 120000]],
+      );
+      await dispatch(current.page, seeds);
+      await sync(current);
+      const other = await join(fixtures, harness, config, 'B', baseURL!);
+      await sync(other);
+      const released = await join(
+        fixtures,
+        harness,
+        config,
+        'Released',
+        assets.url,
+        true,
+      );
+      await sync(released);
+      const versions: (string | null)[] = [];
+      released.page.on('request', (request) => {
+        if (request.method() === 'GET' && request.url().includes('/api/sync/ops?'))
+          versions.push(new URL(request.url()).searchParams.get('appVersion'));
+      });
+      const todayValue = async (): Promise<string> => {
+        await released.page.goto('/#/habits');
+        const row = released.page
+          .locator('.habit-row')
+          .filter({ has: released.page.getByText(EDITED, { exact: true }) });
+        await expect(row).toHaveCount(1);
+        return row.locator('.day-cell').nth(6).locator('.value-text').innerText();
+      };
+      await perform(current, false, { list: 'habits', edit: 'settings' }, ids, '');
+      await perform(other, true, { list: 'habits', edit: 'settings' }, ids, '');
+      await sync(other);
+      await sync(current);
+      await sync(other);
+      await sync(released);
+      const final = await snapshot(current.page, 'habits', ids);
+      expect(await snapshot(other.page, 'habits', ids)).toEqual(final);
+      expect(final.entities[ids[0]]).toMatchObject({ title: EDITED, type: 'StopWatch' });
+      expect(
+        (await rows(current.page))
+          .filter((r) => r.source === 'local' && !!r.rejectedAt)
+          .map((r) => r.op.a),
+      ).toEqual(['SU']);
+      expect(await todayValue()).toBe('2m');
+      await released.page.reload();
+      await sync(released);
+      expect(await todayValue()).toBe('2m');
+      expect(await habitOrder(released.page)).toEqual(
+        final.order
+          .filter((id) => id !== ids[1])
+          .map((id) => (id === ids[0] ? EDITED : id)),
+      );
+      expect(versions).toContain('19.1.0');
+    });
+  });
+});
