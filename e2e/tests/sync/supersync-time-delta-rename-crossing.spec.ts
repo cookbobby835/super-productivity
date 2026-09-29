@@ -184,6 +184,9 @@ test.describe('@supersync time delta crossing a concurrent task edit', () => {
         };
         await expectConverged();
         expect(forcedDownloads).toEqual([]);
+        expect(rejections).toContain(
+          pendingSide === 'delta' ? 'A:CONFLICT_CONCURRENT' : 'B:CONFLICT_CONCURRENT',
+        );
 
         // Replay from the persisted op log must reach the same state: a
         // re-appended copy of a delta would count the tracked time twice here.
@@ -205,4 +208,79 @@ test.describe('@supersync time delta crossing a concurrent task edit', () => {
       }
     });
   }
+
+  // Boot rebuilds the durable clock from the state cache plus the op tail. A
+  // rebased op the cache already covers must not hand its counter to the next
+  // local op, or receivers drop that op as already applied.
+  test('time tracked after a reload follows a rebased delta the state cache covers', async ({
+    browser,
+    baseURL,
+    testRunId,
+  }) => {
+    test.setTimeout(300000);
+
+    const taskDate = '2026-07-13';
+    const taskName = `DeltaCrossingReload-${Date.now()}`;
+    const clients: SimulatedE2EClient[] = [];
+    const reload = async (client: SimulatedE2EClient): Promise<void> => {
+      await client.page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 });
+      await waitForAppReady(client.page);
+      await waitForTask(client.page, taskName);
+    };
+
+    try {
+      const syncConfig = getSuperSyncConfig(await createTestUser(testRunId));
+      const clientA = await createSimulatedClient(browser, baseURL!, 'A', testRunId);
+      clients.push(clientA);
+      await clientA.sync.setupSuperSync(syncConfig);
+      await clientA.workView.addTask(taskName);
+      await waitForTask(clientA.page, taskName);
+      // More than ten ops, so the next reload's replay saves a state cache.
+      for (let i = 0; i < 12; i++) {
+        await recordTaskTimeDelta(clientA, taskName, taskDate, 1000);
+      }
+      await clientA.sync.syncAndWait();
+
+      const clientB = await createSimulatedClient(browser, baseURL!, 'B', testRunId);
+      clients.push(clientB);
+      await clientB.sync.setupSuperSync(syncConfig);
+      await clientB.sync.syncAndWait();
+      await waitForTask(clientB.page, taskName);
+      await expectExactTaskTime(clientB, taskName, 12000);
+      for (const client of clients) {
+        await blockBackgroundSync(client);
+      }
+      const rejections = recordRejections(clients);
+
+      await recordTaskTimeDelta(clientA, taskName, taskDate, 3000);
+      await renameTask(clientB, taskName, `${taskName}-Renamed`);
+      await sync(clientB);
+      // The replay caches state covering A's pending delta; the sync then
+      // rebases that delta past B's rename.
+      await reload(clientA);
+      await clientA.sync.syncAndWait();
+      expect(rejections).toContain('A:CONFLICT_CONCURRENT');
+      await sync(clientB);
+      await expectExactTaskTime(clientB, taskName, 15000);
+
+      await reload(clientA);
+      await blockBackgroundSync(clientA);
+      await recordTaskTimeDelta(clientA, taskName, taskDate, 4000);
+      await clientA.sync.syncAndWait();
+      await sync(clientB);
+
+      const clientC = await createSimulatedClient(browser, baseURL!, 'C', testRunId);
+      clients.push(clientC);
+      await clientC.sync.setupSuperSync(syncConfig);
+      await clientC.sync.syncAndWait();
+      await waitForTask(clientC.page, taskName);
+      for (const client of clients) {
+        await expectExactTaskTime(client, taskName, 19000);
+      }
+    } finally {
+      for (const client of clients) {
+        await closeClient(client);
+      }
+    }
+  });
 });
