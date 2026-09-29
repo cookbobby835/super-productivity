@@ -1,4 +1,5 @@
 import type { Page } from '@playwright/test';
+import { writeFile } from 'node:fs/promises';
 import type { CompactOperationLogEntry } from '../../../src/app/op-log/persistence/compact/compact-operation.types';
 import { expect, test } from '../../fixtures/supersync.fixture';
 import { NotePage } from '../../pages/note.page';
@@ -380,9 +381,10 @@ const editHabitSettings = async (
   const dialog = page.locator('dialog-simple-counter-edit-settings');
   await expect(dialog).toBeVisible();
   if (edit === 'disable') {
-    const enabled = dialog.getByRole('checkbox', { name: 'Enabled' });
+    const enabled = dialog.getByRole('switch', { name: 'Enabled', exact: true });
     await expect(enabled).toBeChecked();
-    await enabled.uncheck();
+    await enabled.click();
+    await expect(enabled).not.toBeChecked();
   } else {
     await dialog.getByRole('textbox', { name: 'Title' }).fill(EDITED);
   }
@@ -679,10 +681,10 @@ for (const crossing of crossings) {
             fullStateOps(await rows(fresh.page)).every((id) => fullStateBefore.has(id)),
           ).toBe(true);
         } finally {
-          await testInfo.attach('evidence', {
-            body: JSON.stringify(evidence, null, 2),
-            contentType: 'application/json',
-          });
+          await writeFile(
+            testInfo.outputPath('evidence.json'),
+            JSON.stringify(evidence, null, 2),
+          );
           for (const client of clients) await closeClient(client);
         }
       });
