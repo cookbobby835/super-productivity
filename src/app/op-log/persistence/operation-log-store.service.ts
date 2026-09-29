@@ -1323,6 +1323,71 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
   }
 
   /**
+   * Moves pending local operations causally past `clockToDominate` IN PLACE:
+   * id, seq and payload stay, and each op takes the next counter on the durable
+   * clock in seq order. A re-appended copy would replay additive reducers
+   * (`syncTimeSpent`) twice — the rejected original still replays, or a
+   * snapshot already holds its effect. Only for ops the server rejected (so
+   * never stored); the caller holds the OPERATION_LOG lock.
+   */
+  async rebasePendingLocalOps(
+    opIds: readonly string[],
+    clockToDominate: VectorClock,
+  ): Promise<Operation[]> {
+    await this._ensureInit();
+    const clientId = await this.clientIdProvider.loadClientId();
+    if (!clientId) {
+      throw new Error('Cannot rebase local operations without a current client ID.');
+    }
+    const rebased: Operation[] = [];
+    let committedClock: VectorClock | undefined;
+    await this._adapter.transaction(
+      [STORE_NAMES.OPS, STORE_NAMES.VECTOR_CLOCK],
+      'readwrite',
+      async (tx) => {
+        const entries: StoredOperationLogEntry[] = [];
+        for (const opId of opIds) {
+          const entry = await tx.getFromIndex<StoredOperationLogEntry>(
+            STORE_NAMES.OPS,
+            OPS_INDEXES.BY_ID,
+            opId,
+          );
+          if (
+            entry?.source !== 'local' ||
+            entry.syncedAt !== undefined ||
+            entry.rejectedAt !== undefined ||
+            entry.reducerRejectedAt !== undefined ||
+            decodeStoredEntry(entry).op.clientId !== clientId
+          ) {
+            throw new Error(`Cannot rebase ${opId}: not a pending op of this client`);
+          }
+          entries.push(entry);
+        }
+        const clockEntry = await tx.get<VectorClockEntry>(
+          STORE_NAMES.VECTOR_CLOCK,
+          SINGLETON_KEY,
+        );
+        let clock = clockEntry?.clock ?? {};
+        for (const entry of entries.sort((a, b) => a.seq - b.seq)) {
+          clock = rebaseLocalClockOnDurable(clock, clockToDominate, clientId);
+          const op: Operation = { ...decodeStoredEntry(entry).op, vectorClock: clock };
+          await tx.put(STORE_NAMES.OPS, { ...entry, op: encodeOperation(op) });
+          rebased.push(op);
+        }
+        await tx.put(
+          STORE_NAMES.VECTOR_CLOCK,
+          { clock, lastUpdate: Date.now() } satisfies VectorClockEntry,
+          SINGLETON_KEY,
+        );
+        committedClock = clock;
+      },
+    );
+    this._vectorClockCache = committedClock ? { ...committedClock } : null;
+    this._invalidateUnsyncedCache();
+    return rebased;
+  }
+
+  /**
    * Atomically records reducer completion and merges the corresponding clocks.
    * A committed reducer must never be durable without its clock: that would let
    * the next local operation be causally older than state already visible in

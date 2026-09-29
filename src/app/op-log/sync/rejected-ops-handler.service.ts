@@ -446,6 +446,16 @@ export class RejectedOpsHandlerService {
         };
       }
 
+      // A rejection explained by a commuting task-time crossing this client
+      // already applied (#10214) is rebased in place: it needs neither the
+      // forced full download nor the LWW snapshot below. The rebased ops stay
+      // pending and are re-uploaded like merged ops.
+      const rebasedOpIds =
+        await this.supersededOperationResolver.rebaseCommutingTimeDeltaRejections(
+          opsToResolve,
+        );
+      mergedOpsCreated += rebasedOpIds.size;
+
       // Helper to check which ops are still pending, preserving existingClock from rejection
       const getStillPendingOps = async (): Promise<
         Array<{ opId: string; op: Operation; existingClock?: VectorClock }>
@@ -458,6 +468,7 @@ export class RejectedOpsHandlerService {
         for (const { opId, op, existingClock } of opsToResolve) {
           const entry = await this.opLogStore.getOpById(opId);
           if (
+            !rebasedOpIds.has(opId) &&
             entry?.source === 'local' &&
             entry.syncedAt === undefined &&
             entry.rejectedAt === undefined &&

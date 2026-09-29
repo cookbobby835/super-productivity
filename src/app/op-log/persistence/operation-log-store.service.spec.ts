@@ -1809,6 +1809,55 @@ describe('OperationLogStoreService', () => {
     });
   });
 
+  describe('rebasePendingLocalOps', () => {
+    it('should move pending local ops past a clock in place and in seq order', async () => {
+      const first = createTestOperation({
+        id: 'rebase-1',
+        vectorClock: { testClient: 5 },
+      });
+      const second = createTestOperation({
+        id: 'rebase-2',
+        vectorClock: { testClient: 6 },
+      });
+      await service.appendWithVectorClockOverwrite(first, 'local');
+      await service.appendWithVectorClockOverwrite(second, 'local');
+      const before = await service.getOpsAfterSeq(0);
+      // Warm the unsynced cache: it must not keep serving the stale clocks.
+      expect((await service.getUnsynced()).length).toBe(2);
+
+      const rebased = await service.rebasePendingLocalOps([second.id, first.id], {
+        remote: 3,
+        testClient: 2,
+      });
+
+      const after = await service.getOpsAfterSeq(0);
+      expect(after.map(({ seq, op }) => [seq, op.id])).toEqual(
+        before.map(({ seq, op }) => [seq, op.id]),
+      );
+      expect(after.map(({ op }) => op.payload)).toEqual([first.payload, second.payload]);
+      expect(after.map(({ op }) => op.vectorClock)).toEqual([
+        { testClient: 7, remote: 3 },
+        { testClient: 8, remote: 3 },
+      ]);
+      expect(rebased.map(({ id }) => id)).toEqual([first.id, second.id]);
+      expect((await service.getUnsynced()).map(({ op }) => op.vectorClock)).toEqual(
+        after.map(({ op }) => op.vectorClock),
+      );
+      expect(await service.getVectorClock()).toEqual({ testClient: 8, remote: 3 });
+    });
+
+    it('should refuse to rebase an op that is no longer pending', async () => {
+      const op = createTestOperation({ id: 'rebase-synced' });
+      await service.append(op, 'local');
+      await service.markSynced([(await service.getOpsAfterSeq(0))[0].seq]);
+
+      await expectAsync(
+        service.rebasePendingLocalOps([op.id], { remote: 1 }),
+      ).toBeRejectedWithError(/Cannot rebase rebase-synced/);
+      expect((await service.getOpsAfterSeq(0))[0].op.vectorClock).toEqual(op.vectorClock);
+    });
+  });
+
   describe('appendMixedSourceBatchSkipDuplicates', () => {
     it('should atomically append a replacement and reject its predecessors with one timestamp', async () => {
       const firstPredecessor = createTestOperation({ id: 'first-predecessor' });

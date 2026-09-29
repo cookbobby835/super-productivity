@@ -1064,6 +1064,18 @@ When operations are rejected (either local or remote):
 - `getUnsynced()` excludes rejected ops (won't re-upload)
 - Compaction may eventually delete old rejected ops
 
+A rejection explained by a commuting task-time crossing is not replaced
+(#10214): conflict detection applies a remote edit that commutes with a task's
+pending time work and leaves the pending ops alone, so their clocks miss it and
+the server rejects them. When the rejection's `existingClock` is the clock of
+that applied remote row, every pending op of the task moves past it in place
+(`rebaseCommutingTimeDeltaRejections` → `rebasePendingLocalOps`): same id, seq
+and payload, fresh clock. A replacement op would replay a `syncTimeSpent` delta
+twice (the rejected original still replays, or a snapshot already holds it), and
+an LWW snapshot would turn the delta into an absolute write over a third
+device's concurrent time. The rejection proves the server never stored those
+ids and the applied row is the causal proof, so no seq-0 re-download is needed.
+
 ### Archive-Wins Rule
 
 When a `moveToArchive` operation conflicts with a field-level update (e.g., rename, time tracking changes), the archive operation **always wins** regardless of timestamps. This bypasses the normal LWW timestamp comparison because archiving represents explicit user intent that should not be reversed by a concurrent field update.
