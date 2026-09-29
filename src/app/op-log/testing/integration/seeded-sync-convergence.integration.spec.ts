@@ -80,7 +80,7 @@ const KNOWN_FAILURES: readonly {
       'side=local actionType=[Note] Update Note Order',
     tracking:
       '#10264 class: a note reorder crossing an edit of a listed note stops sync. ' +
-      '#10364 admits in-place edits; Today order vs pin keeps the stop on purpose.',
+      'Since #10364 only Today order vs pin stops, on purpose (fallback: #10342).',
     witness: 'all/2',
   },
   {
@@ -117,16 +117,10 @@ const KNOWN_FAILURES: readonly {
     witness: 'fields/4',
   },
   {
-    signature: 'invariant:todayOrder-duplicates',
-    tracking:
-      'Pinning a note already in note.todayOrder adds it twice (#10364 dedups the pin).',
-    witness: 'fields/16',
-  },
-  {
     signature: 'diverge:todayOrder',
     tracking:
       'Pins prepend in local arrival order, so devices can order Today notes ' +
-      'differently (order only; no issue). Duplicates above also show here.',
+      'differently (order only; no issue).',
     witness: 'fields/57',
   },
 ];
