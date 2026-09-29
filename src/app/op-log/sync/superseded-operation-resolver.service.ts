@@ -49,6 +49,7 @@ import {
   ReorderReplaySnapshot,
 } from './reorder-conflict.util';
 import { UnsupportedMultiEntityConflictError } from '../core/errors/sync-errors';
+import { asPatchSnapshotIfTypeShadowed } from './lww-snapshot-patch-mode.util';
 
 type SupersededOperation = {
   opId: string;
@@ -640,6 +641,7 @@ export class SupersededOperationResolverService {
             },
           };
         }
+        newOp = asPatchSnapshotIfTypeShadowed(newOp);
 
         newOpsCreated.push(newOp);
         const followUpOps =

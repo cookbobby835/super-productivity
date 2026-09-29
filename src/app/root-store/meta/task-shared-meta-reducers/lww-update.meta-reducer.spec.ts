@@ -1125,6 +1125,106 @@ describe('lwwUpdateMetaReducer', () => {
       expect(counter.type).toBe(SimpleCounterType.StopWatch);
       expect(appDataValidators.simpleCounter(counterState as never).success).toBe(true);
     });
+
+    // The winner's snapshot carries its own type; keeping the receiver's type
+    // instead made two devices silently diverge when their types differed.
+    describe('winner type', () => {
+      const receiverCounter = {
+        id: 'cnt_h',
+        title: 'Habit',
+        isEnabled: true,
+        icon: null,
+        type: SimpleCounterType.StopWatch,
+        countOnDay: {},
+        isOn: false,
+        isTrackStreaks: true,
+        streakMinValue: 5,
+      };
+      const counterOp = (payload: Record<string, unknown>): Operation => ({
+        id: 'op-counter-winner',
+        actionType: '[SIMPLE_COUNTER] LWW Update' as ActionType,
+        opType: OpType.Update,
+        entityType: 'SIMPLE_COUNTER',
+        entityId: 'cnt_h',
+        payload: { entityChanges: [], ...payload } as Operation['payload'],
+        clientId: 'clientA',
+        vectorClock: { clientA: 3 },
+        timestamp: 1700000000000,
+        schemaVersion: 1,
+      });
+      // The wire (JSON) drops undefined-valued keys.
+      const overTheWire = (op: Operation): Operation => JSON.parse(JSON.stringify(op));
+      const applyToReceiver = (
+        op: Operation,
+        entities: Record<string, unknown> = { cnt_h: receiverCounter },
+      ): { entities: Record<string, unknown> } | undefined => {
+        reducer(makeStateWithCounters(entities), convertOpToAction(overTheWire(op)));
+        const updated = mockReducer.calls.mostRecent().args[0] as Record<
+          string,
+          { entities: Record<string, unknown> } | undefined
+        >;
+        return updated[SIMPLE_COUNTER_FEATURE_NAME];
+      };
+      const winner = {
+        ...receiverCounter,
+        title: 'Winning title',
+        type: SimpleCounterType.ClickCounter,
+        isTrackStreaks: false,
+        streakMinValue: undefined,
+      };
+
+      it('replaces the receiver type with the one a replace snapshot carries', () => {
+        const counterState = applyToReceiver(
+          counterOp({ actionPayload: winner, lwwUpdateMode: 'replace' }),
+        );
+        const counter = counterState?.entities['cnt_h'] as SimpleCounter;
+        expect(counter.type).toBe(SimpleCounterType.ClickCounter);
+        expect(counter.title).toBe('Winning title');
+        expect(counter.streakMinValue).toBeUndefined();
+        expect(appDataValidators.simpleCounter(counterState as never).success).toBe(true);
+      });
+
+      it('applies the type and listed clears of a patch-mode snapshot', () => {
+        const counterState = applyToReceiver(
+          counterOp({
+            actionPayload: winner,
+            lwwUpdateMode: 'patch',
+            clearedFields: ['streakMinValue'],
+          }),
+        );
+        const counter = counterState?.entities['cnt_h'] as SimpleCounter;
+        expect(counter.type).toBe(SimpleCounterType.ClickCounter);
+        expect(counter.isTrackStreaks).toBe(false);
+        expect(counter.streakMinValue).toBeUndefined();
+        expect(appDataValidators.simpleCounter(counterState as never).success).toBe(true);
+      });
+
+      it('keeps the receiver type when the op carries none', () => {
+        const counterState = applyToReceiver(
+          counterOp({
+            actionPayload: { id: 'cnt_h', title: 'Merged title' },
+            lwwUpdateMode: 'patch',
+          }),
+        );
+        const counter = counterState?.entities['cnt_h'] as SimpleCounter;
+        expect(counter.type).toBe(SimpleCounterType.StopWatch);
+        expect(counter.title).toBe('Merged title');
+      });
+
+      it('recreates a locally deleted counter with the winner type', () => {
+        const counterState = applyToReceiver(
+          counterOp({
+            actionPayload: { ...winner, type: SimpleCounterType.StopWatch },
+            lwwUpdateMode: 'replace',
+            recreatesEntityAfterDelete: true,
+          }),
+          {},
+        );
+        const counter = counterState?.entities['cnt_h'] as SimpleCounter;
+        expect(counter.type).toBe(SimpleCounterType.StopWatch);
+        expect(appDataValidators.simpleCounter(counterState as never).success).toBe(true);
+      });
+    });
   });
 
   describe('[PROJECT] LWW Update', () => {
