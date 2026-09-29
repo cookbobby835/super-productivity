@@ -435,7 +435,7 @@
       },
       {
         "signature": "divergence:.task.entities.*.timeSpentOnDay.*",
-        "detail": "B vs fresh at .task.entities.t3.timeSpentOnDay.2026-09-29: 5000 vs 2000"
+        "detail": "B vs fresh at .task.entities.t3.timeSpentOnDay.<day>: 5000 vs 2000"
       },
       {
         "signature": "time-loss:task",
@@ -461,7 +461,7 @@
     "failures": [
       {
         "signature": "field-reverted:habit.countOnDay",
-        "detail": "habit:COFFEE_COUNTER.countOnDay.2026-09-29: only write 1, converged "
+        "detail": "habit:COFFEE_COUNTER.countOnDay.<day>: only write 1, converged "
       }
     ],
     "rejections": []
@@ -742,7 +742,7 @@
     "failures": [
       {
         "signature": "divergence:.task.entities.*.date",
-        "detail": "A vs fresh at .task.entities.t1.date: \"2026-09-30\" vs "
+        "detail": "A vs fresh at .task.entities.t1.date: \"<day>\" vs "
       },
       {
         "signature": "divergence:.task.entities.*.duration",
@@ -762,7 +762,7 @@
       },
       {
         "signature": "divergence:.task.entities.*.timeSpentOnDay",
-        "detail": "A vs fresh at .task.entities.t1.timeSpentOnDay: {} vs {\"2026-09-30\":2000}"
+        "detail": "A vs fresh at .task.entities.t1.timeSpentOnDay: {} vs {\"<day>\":2000}"
       },
       {
         "signature": "divergence:.task.ids.*",
@@ -817,7 +817,7 @@
       },
       {
         "signature": "divergence:.task.entities.*.timeSpentOnDay",
-        "detail": "A vs fresh at .task.entities.t2.timeSpentOnDay: {\"2026-09-30\":3000} vs {}"
+        "detail": "A vs fresh at .task.entities.t2.timeSpentOnDay: {\"<day>\":3000} vs {}"
       },
       {
         "signature": "divergence:.task.entities.*.title",
@@ -845,7 +845,7 @@
       },
       {
         "signature": "restart-changed:.task.entities.*.timeSpentOnDay",
-        "detail": "B after vs before restart at .task.entities.t2.timeSpentOnDay: {} vs {\"2026-09-30\":3000}"
+        "detail": "B after vs before restart at .task.entities.t2.timeSpentOnDay: {} vs {\"<day>\":3000}"
       },
       {
         "signature": "restart-changed:.task.entities.*.title",

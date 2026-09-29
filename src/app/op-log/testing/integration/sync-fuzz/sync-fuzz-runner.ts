@@ -197,8 +197,13 @@ export const runFuzz = async (options: FuzzOptions): Promise<FuzzResult> => {
   const failures: FuzzFailure[] = [];
   const fail = (signature: string, detail: string): void => {
     if (!failures.some((f) => f.signature === signature)) {
-      // Wall-clock values depend on when the run started; keep them out.
-      failures.push({ signature, detail: detail.replace(/\b1[5-9]\d{11}\b/g, '<time>') });
+      // Wall-clock times and days depend on when the run started; keep them out.
+      failures.push({
+        signature,
+        detail: detail
+          .replace(/\b1[5-9]\d{11}\b/g, '<time>')
+          .replace(/\b\d{4}-\d{2}-\d{2}\b/g, '<day>'),
+      });
     }
   };
   const ledger = new Ledger();
