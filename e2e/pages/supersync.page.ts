@@ -2190,11 +2190,14 @@ export class SuperSyncPage extends BasePage {
       // syncAndWait() leaves unsyncedCount > 0 even though the engine has nothing
       // left to upload. Run a bounded set of extra cycles so callers observe a truly
       // quiescent state. (supersync-cross-entity "Task with subtasks" flake)
-      for (let flush = 0; flush < 3; flush++) {
-        const pending = await this._getUnsyncedOperationCount();
-        if (pending === null || pending === 0) {
-          break;
-        }
+      //
+      // Decide on the read that ends the loop. Re-reading after a zero read
+      // raced with ops created in between and failed without a flush attempt:
+      // in the #10291 spec, the deferred day change runs when the post-sync
+      // cooldown ends, about when this loop starts, and its TODAY tag repair
+      // creates an op.
+      let pending = await this._getUnsyncedOperationCount();
+      for (let flush = 0; flush < 3 && pending !== null && pending > 0; flush++) {
         // Don't paper over a genuine error state by re-syncing.
         const hasError = await this.syncErrorIcon.isVisible().catch(() => false);
         if (hasError) {
@@ -2207,15 +2210,15 @@ export class SuperSyncPage extends BasePage {
         await this._handleSyncDialogs(useLocal);
         await this._triggerSuperSyncCycle(10000);
         await this._waitForSyncCompletion({ timeout: 10000, useLocal });
+        pending = await this._getUnsyncedOperationCount();
       }
 
-      const remainingPending = await this._getUnsyncedOperationCount();
-      if (remainingPending === null) {
+      if (pending === null) {
         throw new Error('Could not verify that SuperSync drained all pending operations');
       }
-      if (remainingPending > 0) {
+      if (pending > 0) {
         throw new Error(
-          `SuperSync still has ${remainingPending} pending operation(s) after 3 flush attempts`,
+          `SuperSync still has ${pending} pending operation(s) after 3 flush attempts`,
         );
       }
 
