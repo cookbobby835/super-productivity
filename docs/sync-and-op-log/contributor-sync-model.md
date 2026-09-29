@@ -271,6 +271,11 @@ issue with the reproduction and the affected path, not a PR. Among fixes that
 qualify, prefer the one that removes a special case or adds the least ongoing
 machinery, and say in the PR which category the fix meets.
 
+**Flow limit.** At most three sync PRs are open at a time. Each one is
+reviewed before merge by a person or a session that did not write it, so
+the next fix is not built on an unchecked one. Further work waits as a draft
+PR or an issue.
+
 ---
 
 ## Clearing a field — `undefined` does not survive the wire (#9776)
