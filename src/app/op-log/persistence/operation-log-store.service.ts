@@ -65,22 +65,18 @@ import { limitVectorClockSize, vectorClockToString } from '../../core/util/vecto
 import { CLIENT_ID_PROVIDER, ClientIdProvider } from '../util/client-id.provider';
 import { TabSeqFrontierService } from './tab-seq-frontier.service';
 import { CompactOperation } from './compact/compact-operation.types';
+import { isCompactOperation, encodeOperation } from './compact/operation-codec.service';
 import {
-  isCompactOperation,
-  decodeOperation,
-  encodeOperation,
-} from './compact/operation-codec.service';
+  ReplayAnchorSnapshot,
+  StateCacheEntry,
+  StoredOperationLogEntry,
+  VectorClockEntry,
+  decodeStoredEntry,
+  getOpId,
+  getStoredOpType,
+} from './operation-log-store-rows';
 import { LockService } from '../sync/lock.service';
 import { rebaseLocalClockOnDurable } from './operation-log-clock.util';
-
-/**
- * Vector clock entry stored in the vector_clock object store.
- * Contains the clock and last update timestamp.
- */
-interface VectorClockEntry {
-  clock: VectorClock;
-  lastUpdate: number;
-}
 
 export interface MixedSourceOperationBatch {
   ops: readonly Operation[];
@@ -101,32 +97,6 @@ export type {
   ImportBackupReason,
   ImportBackupCaptureMeta,
 } from './import-backup-ring.util';
-
-/**
- * Shape stored in the `state_cache` store (keyPath `id`).
- *
- * `id` is optional in the type so the read-side return types stay assignable
- * from the looser snapshot shapes callers/tests construct (the pre-migration
- * return types did not surface `id`); the field is always present on rows
- * actually written here.
- */
-interface StateCacheEntry {
-  id?: string;
-  state: unknown;
-  lastAppliedOpSeq: number;
-  vectorClock: VectorClock;
-  compactedAt: number;
-  schemaVersion?: number;
-  compactionCounter?: number;
-  snapshotEntityKeys?: string[];
-}
-
-interface ReplayAnchorSnapshot {
-  state: unknown;
-  vectorClock: VectorClock;
-  compactedAt: number;
-  schemaVersion?: number;
-}
 
 export interface RawRebuildIncompleteEntry {
   incomplete: true;
@@ -150,52 +120,6 @@ type OpLogMetaEntry =
   | RawRebuildIncompleteEntry
   | RawRebuildRecoveryEntry
   | LegacyTerminalRemoteFailuresMigrationEntry;
-
-/**
- * Stored operation log entry that can hold either compact or full operation format.
- * Used internally for backwards compatibility with existing data.
- */
-interface StoredOperationLogEntry {
-  seq: number;
-  op: Operation | CompactOperation;
-  appliedAt: number;
-  source: 'local' | 'remote';
-  syncedAt?: number;
-  rejectedAt?: number;
-  reducerRejectedAt?: number;
-  applicationStatus?: 'pending' | 'archive_pending' | 'applied' | 'failed';
-  retryCount?: number;
-}
-
-/**
- * Decodes a stored entry to a full OperationLogEntry.
- * Handles both compact and full operation formats for backwards compatibility.
- */
-const decodeStoredEntry = (stored: StoredOperationLogEntry): OperationLogEntry => {
-  const op = isCompactOperation(stored.op) ? decodeOperation(stored.op) : stored.op;
-  return {
-    seq: stored.seq,
-    op,
-    appliedAt: stored.appliedAt,
-    source: stored.source,
-    syncedAt: stored.syncedAt,
-    rejectedAt: stored.rejectedAt,
-    reducerRejectedAt: stored.reducerRejectedAt,
-    applicationStatus: stored.applicationStatus,
-    retryCount: stored.retryCount,
-  };
-};
-
-/**
- * Extracts the operation ID from either compact or full format.
- * Both formats use 'id' as the key for IndexedDB index compatibility.
- */
-const getOpId = (op: Operation | CompactOperation): string => {
-  return op.id;
-};
-
-const getStoredOpType = (op: Operation | CompactOperation): string =>
-  isCompactOperation(op) ? op.o : op.opType;
 
 /**
  * Calculates the durable clock after a reducer-committed remote batch.
