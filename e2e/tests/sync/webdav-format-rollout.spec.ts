@@ -75,6 +75,54 @@ test.describe('@webdav automatic file format rollout', () => {
     }
   });
 
+  test('seeds an empty folder as v2 when a synced client moves to it', async ({
+    browser,
+    baseURL,
+    request,
+  }) => {
+    const folder = generateSyncFolderName('rollout-move');
+    const nextFolder = `${folder}-next`;
+    const nextRemote = `${WEBDAV_CONFIG_TEMPLATE.baseUrl}${nextFolder}/DEV/`;
+    await createSyncFolder(request, folder);
+    await createSyncFolder(request, nextFolder);
+    const a = await setupSyncClient(browser, baseURL);
+    try {
+      const work = new WorkViewPage(a.page);
+      const sync = new SyncPage(a.page);
+      await work.waitForTaskList();
+      const title = `Moved client task ${folder}`;
+      await work.addTask(title);
+      await waitForStatePersistence(a.page);
+      await sync.setupWebdavSync(
+        { ...WEBDAV_CONFIG_TEMPLATE, syncFolderPath: `/${folder}` },
+        { useProductFormatDefault: true },
+      );
+      await waitForSyncComplete(a.page, sync);
+
+      // With its ops synced, the client seeds the empty target with a
+      // SERVER_MIGRATION SYNC_IMPORT through the snapshot upload path.
+      await sync.setupWebdavSync(
+        { ...WEBDAV_CONFIG_TEMPLATE, syncFolderPath: `/${nextFolder}` },
+        { isReconfigure: true, useProductFormatDefault: true },
+      );
+      await waitForSyncComplete(a.page, sync);
+      const monolith = await readPrefixedFile<{
+        version: number;
+        state: unknown;
+        snapshotBaseClock?: unknown;
+      }>(request, `${nextRemote}sync-data.json`, authorization);
+      expect(monolith.version).toBe(2);
+      // Only a snapshot upload records a base clock when it creates the file.
+      expect(monolith.snapshotBaseClock).toBeDefined();
+      expect(JSON.stringify(monolith.state)).toContain(title);
+      for (const file of ['sync-ops.json', 'sync-state.json']) {
+        expect(await remoteStatus(request, `${nextRemote}${file}`)).toBe(404);
+      }
+    } finally {
+      await closeContextsSafely(a.context);
+    }
+  });
+
   test('replaces a legacy v16 folder with v2 after a confirmed force overwrite', async ({
     browser,
     baseURL,

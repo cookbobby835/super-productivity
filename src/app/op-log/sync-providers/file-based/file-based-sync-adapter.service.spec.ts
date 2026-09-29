@@ -424,6 +424,26 @@ describe('FileBasedSyncAdapterService', () => {
       expect((await adapter.downloadOps(0)).snapshotState).toBeDefined();
     });
 
+    it('seeds an empty folder as v2 through the snapshot path', async () => {
+      // A synced device moving to an empty folder uploads a SERVER_MIGRATION
+      // SYNC_IMPORT here, not through uploadOps.
+      const result = await adapter.uploadSnapshot!(
+        { tasks: [] },
+        'client1',
+        'initial',
+        { client1: 1 },
+        1,
+        false,
+        'import-op',
+        false,
+        'SYNC_IMPORT',
+        'SERVER_MIGRATION',
+      );
+      expect(result.accepted).toBeTrue();
+      expect(parseWithPrefix(files.get(C.SYNC_FILE)!).version).toBe(2);
+      expect([...files.keys()].sort()).toEqual([C.BACKUP_FILE, C.SYNC_FILE].sort());
+    });
+
     for (const path of [C.OPS_FILE, C.SYNC_FILE]) {
       it(`propagates a discovery error at ${path} without writing`, async () => {
         const failure = new AuthFailSPError('Authentication failed (HTTP 401)');
