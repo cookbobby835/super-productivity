@@ -24,6 +24,7 @@ import {
   SimpleCounterType,
 } from '../../../features/simple-counter/simple-counter.model';
 import { convertOpToAction } from '../../../op-log/apply/operation-converter.util';
+import { asPatchSnapshotIfTypeShadowed } from '../../../op-log/sync/lww-snapshot-patch-mode.util';
 import { ActionType, Operation, OpType } from '../../../op-log/core/operation.types';
 import { PLUGIN_USER_DATA_FEATURE_NAME } from '../../../plugins/store/plugin-user-data.reducer';
 import { BOARDS_FEATURE_NAME } from '../../../features/boards/store/boards.reducer';
@@ -1197,6 +1198,44 @@ describe('lwwUpdateMetaReducer', () => {
         expect(counter.isTrackStreaks).toBe(false);
         expect(counter.streakMinValue).toBeUndefined();
         expect(appDataValidators.simpleCounter(counterState as never).success).toBe(true);
+      });
+
+      // Senders turn a whole-habit replace into a patch plus clears. A current
+      // receiver must end with the same habit either way, nested objects
+      // included: updateOne replaces them, it does not merge them.
+      it('ends with the same habit from the sent patch as from the replace', () => {
+        const [dayA, dayB] = ['2026-09-01', '2026-09-02'];
+        const receiver = {
+          ...receiverCounter,
+          isHideButton: true,
+          countOnDay: { [dayA]: 3, [dayB]: 1 },
+          countdownDuration: 60000,
+        };
+        const replaceOp = counterOp({
+          actionPayload: { ...winner, countOnDay: { [dayB]: 5 } },
+          lwwUpdateMode: 'replace',
+        });
+        const habitAfter = (op: Operation): Record<string, unknown> => {
+          const habit = {
+            ...(applyToReceiver(op, { cnt_h: receiver })?.entities['cnt_h'] as Record<
+              string,
+              unknown
+            >),
+          };
+          delete habit['modified'];
+          return JSON.parse(JSON.stringify(habit));
+        };
+
+        const patchOp = asPatchSnapshotIfTypeShadowed(replaceOp);
+        expect(patchOp.payload).toEqual(
+          jasmine.objectContaining({ lwwUpdateMode: 'patch' }),
+        );
+        const fromPatch = habitAfter(patchOp);
+
+        expect(fromPatch).toEqual(habitAfter(replaceOp));
+        expect(fromPatch['type']).toBe(SimpleCounterType.ClickCounter);
+        expect(fromPatch['countOnDay']).toEqual({ [dayB]: 5 });
+        expect(fromPatch['countdownDuration']).toBeUndefined();
       });
 
       it('keeps the receiver type when the op carries none', () => {
