@@ -813,10 +813,13 @@ IDs deduplicate ops still in the local log, while vector clocks carry causality.
    create op still in the buffer would re-create an entity archived or deleted
    here since. Keep both checks: older clients could advance their cursor past
    unseen ops during upload, and a restored local log can lag its saved cursor.
-   Ordinary uploads now reject a cold read whose revision differs from the last
-   committed revision (#10239). The next cycle downloads/applies that baseline
-   before retrying; rejection does not acknowledge local ops, write the file, or
-   advance the cursor. Warm-cache uploads retain the conditional PUT check.
+   Ordinary uploads only extend a revision this client applied. They reject a
+   cold read whose revision differs from the last committed revision (#10239),
+   including a file found where none was committed (a late snapshot-only seed or
+   a backup recovery), and a warm cache whose download was not applied yet. The
+   next cycle downloads/applies that baseline before retrying; rejection does
+   not acknowledge local ops, write the file, or advance the cursor. Warm-cache
+   uploads of an applied download retain the conditional PUT check.
    Legacy ops without `sv` use the file's
    `syncVersion` as a conservative upper bound. After local compaction prunes
    such an op's applied ID, a later file write advances this upper bound past

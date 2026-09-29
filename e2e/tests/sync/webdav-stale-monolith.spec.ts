@@ -102,7 +102,9 @@ test.describe('@webdav stale monolith #10256', () => {
       const aTask = 'Writer A task';
       const bTask = 'Writer B pending task';
       const titles = firstSync ? [aTask, bTask] : ['Shared baseline', aTask, bTask];
-      const requiresFirstSyncDecision = firstSync && !isUseSplitSyncFiles;
+      // Both formats defer an upload onto the unapplied probe baseline, so a
+      // first sync ends in the normal first-sync decision.
+      const requiresFirstSyncDecision = firstSync;
       const remoteTitles = requiresFirstSyncDecision ? [aTask] : titles;
       try {
         const a = await client();
@@ -247,9 +249,9 @@ test.describe('@webdav stale monolith #10256', () => {
         for (const title of remoteTitles) {
           await expect(c.page.locator('task', { hasText: title })).toBeVisible();
         }
-        // A changed cold-read revision defers both formats; a fresh split migration
-        // can still append to its initial baseline without publishing a snapshot.
-        expect(remaining).toEqual(isUseSplitSyncFiles && firstSync ? [] : pending);
+        // A changed cold-read revision and an unapplied probe baseline defer both
+        // formats.
+        expect(remaining).toEqual(pending);
 
         for (const writer of [a, b]) {
           if (!requiresFirstSyncDecision) await syncOnce(writer);

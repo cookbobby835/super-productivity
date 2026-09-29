@@ -921,11 +921,11 @@ export class FileBasedSyncAdapterService {
 
     this._assertSnapshotBaseSeen(providerKey, currentData?.snapshotBaseClock);
 
-    // #10256: snapshots must include retained remote ops. A download only stages
-    // its baseline; migration probes do not apply it. After apply, use its cache
-    // (also .bak) or a matching non-empty rev. Never commit an upload-side read.
+    // #10256: an upload only extends a remote file this client applied, with or
+    // without retained ops. A download only stages its baseline; migration probes
+    // do not apply it. After apply, use its cache (also .bak) or a matching rev.
     if (
-      currentData?.recentOps.length &&
+      currentData &&
       (this._pendingExpectedSyncVersions.has(providerKey) ||
         (!this._getCachedSyncData(providerKey) &&
           (!revToMatch || revToMatch !== this._lastSeenRevs.get(providerKey))))
@@ -2282,7 +2282,13 @@ export class FileBasedSyncAdapterService {
     // that write, however little there is to append.
     let isPrimaryCorrupt = false;
 
+    // Only extend a revision this client applied: not a cached download that is
+    // still unapplied, nor a cold read without that revision (for example after
+    // .bak recovery dropped it).
     const cached = this._getCachedOpsData(providerKey);
+    if (cached && this._pendingExpectedSyncVersions.has(providerKey)) {
+      throw new UploadRevToMatchMismatchAPIError('Remote data not applied; retry sync.');
+    }
     if (cached) {
       opsFile = cached.data;
       opsRev = cached.rev;
@@ -2290,8 +2296,7 @@ export class FileBasedSyncAdapterService {
     } else {
       try {
         const r = await this._downloadOpsFile(provider, cfg, encryptKey);
-        const lastSeenRev = this._lastSeenRevs.get(providerKey);
-        if (lastSeenRev && r.rev !== lastSeenRev) {
+        if (r.rev !== this._lastSeenRevs.get(providerKey)) {
           throw new UploadRevToMatchMismatchAPIError('Remote data changed; retry sync.');
         }
         opsFile = r.data;

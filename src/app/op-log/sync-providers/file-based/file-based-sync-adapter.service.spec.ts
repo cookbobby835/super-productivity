@@ -327,9 +327,11 @@ describe('FileBasedSyncAdapterService', () => {
         }
         throw new RemoteFileNotFoundAPIError(path);
       });
+      // The late read is not an applied revision, so the upload stops before the
+      // write-time target guard; both errors are retried silently.
       await expectAsync(
         adapter.uploadOps([createMockSyncOp()], 'client1'),
-      ).toBeRejectedWithError(FileSyncTargetChangedError);
+      ).toBeRejectedWithError(UploadRevToMatchMismatchAPIError);
       expect(mockProvider.uploadFile).not.toHaveBeenCalled();
 
       mockProvider.downloadFile.and.callFake(async (path: string) => {
@@ -795,7 +797,8 @@ describe('FileBasedSyncAdapterService', () => {
       mockProvider.uploadFile.and.returnValue(Promise.resolve({ rev: 'rev-2' }));
 
       // First, download to populate cache
-      await adapter.downloadOps(0);
+      const downloaded = await adapter.downloadOps(0);
+      await adapter.setLastServerSeq(downloaded.latestSeq);
 
       // Reset download spy call count
       mockProvider.downloadFile.calls.reset();
@@ -816,7 +819,8 @@ describe('FileBasedSyncAdapterService', () => {
       mockProvider.uploadFile.and.returnValue(Promise.resolve({ rev: 'rev-124' }));
 
       // Download to populate cache
-      await adapter.downloadOps(0);
+      const downloaded = await adapter.downloadOps(0);
+      await adapter.setLastServerSeq(downloaded.latestSeq);
       mockProvider.downloadFile.calls.reset();
 
       // Upload should pass revToMatch parameter
@@ -845,7 +849,8 @@ describe('FileBasedSyncAdapterService', () => {
         Promise.reject(new UploadRevToMatchMismatchAPIError('Rev mismatch')),
       );
 
-      await adapter.downloadOps(0);
+      const downloaded = await adapter.downloadOps(0);
+      await adapter.setLastServerSeq(downloaded.latestSeq);
 
       const op = createMockSyncOp();
       // Genuine mismatch: adapter throws so next sync cycle can fix the snapshot
@@ -892,7 +897,8 @@ describe('FileBasedSyncAdapterService', () => {
       );
 
       // Download to populate cache with rev-1
-      await adapter.downloadOps(0);
+      const downloaded = await adapter.downloadOps(0);
+      await adapter.setLastServerSeq(downloaded.latestSeq);
 
       const op = createMockSyncOp();
       const result = await adapter.uploadOps([op], 'client1');
@@ -912,7 +918,8 @@ describe('FileBasedSyncAdapterService', () => {
       mockProvider.uploadFile.and.returnValue(Promise.resolve({ rev: 'rev-2' }));
 
       // Download to populate cache
-      await adapter.downloadOps(0);
+      const downloaded = await adapter.downloadOps(0);
+      await adapter.setLastServerSeq(downloaded.latestSeq);
 
       // Upload (should clear cache)
       const op = createMockSyncOp();
@@ -3186,7 +3193,8 @@ describe('FileBasedSyncAdapterService', () => {
         return Promise.resolve({ rev: 'rev-2' });
       });
 
-      await adapter.downloadOps(0);
+      const downloaded = await adapter.downloadOps(0);
+      await adapter.setLastServerSeq(downloaded.latestSeq);
 
       const result = await adapter.uploadOps([createMockSyncOp()], 'client1');
       expect(result.results[0].accepted).toBe(true);
@@ -3442,7 +3450,8 @@ describe('FileBasedSyncAdapterService', () => {
         },
       );
 
-      await adapter.downloadOps(0);
+      const downloaded = await adapter.downloadOps(0);
+      await adapter.setLastServerSeq(downloaded.latestSeq);
 
       await expectAsync(
         adapter.uploadOps([createMockSyncOp()], 'client1'),
@@ -3487,7 +3496,8 @@ describe('FileBasedSyncAdapterService', () => {
       );
 
       // Client B downloads (caches rev-1).
-      await adapter.downloadOps(0);
+      const downloaded = await adapter.downloadOps(0);
+      await adapter.setLastServerSeq(downloaded.latestSeq);
 
       // Client A concurrently commits op-A → remote advances to rev-2.
       remote = {
@@ -3528,6 +3538,9 @@ describe('FileBasedSyncAdapterService', () => {
       );
       const dl = await adapter.downloadOps(1);
       expect(dl.gapDetected).toBe(true);
+      // As in production, the gap triggers a seq-0 download that is applied.
+      const full = await adapter.downloadOps(0);
+      await adapter.setLastServerSeq(full.latestSeq);
 
       // The next upload must build on the REMOTE version (→ 3), proving the stale
       // in-memory counter (5) was reconciled rather than trusted.
@@ -3774,7 +3787,8 @@ describe('FileBasedSyncAdapterService', () => {
       mockProvider.uploadFile.and.returnValue(Promise.resolve({ rev: 'rev-up' }));
 
       // Poll 1: download (seeds cache + rev) then upload (clears cache, records upload rev).
-      await adapter.downloadOps(0);
+      const downloaded = await adapter.downloadOps(0);
+      await adapter.setLastServerSeq(downloaded.latestSeq);
       await adapter.uploadOps([createMockSyncOp()], 'client1');
 
       // Persisted state carries the upload rev.
@@ -4011,6 +4025,15 @@ describe('FileBasedSyncAdapterService', () => {
     const uploadedPaths = (): string[] =>
       mockProvider.uploadFile.calls.allArgs().map((args) => args[0] as string);
 
+    // A sync cycle uploads only onto a download it applied (setLastServerSeq).
+    const applyDownload = async (
+      sinceSeq: number,
+      target: OperationSyncCapable = adapter,
+    ): Promise<void> => {
+      const downloaded = await target.downloadOps(sinceSeq);
+      await target.setLastServerSeq(downloaded.latestSeq);
+    };
+
     beforeEach(() => {
       splitSyncEnabled = true;
       recordUploads();
@@ -4025,6 +4048,7 @@ describe('FileBasedSyncAdapterService', () => {
       const opsFile = makeOpsFile({ syncVersion: 3, recentOps: [] });
       routeDownloads({ [C.OPS_FILE]: addPrefix(opsFile, 3) });
 
+      await applyDownload(3);
       await adapter.uploadOps([createMockSyncOp()], 'client1');
 
       // Never builds a snapshot on the op-only path.
@@ -4047,6 +4071,7 @@ describe('FileBasedSyncAdapterService', () => {
       });
       routeDownloads({ [C.OPS_FILE]: addPrefix(opsFile, 3) });
 
+      await applyDownload(3);
       const result = await adapter.uploadOps([createMockSyncOp()], 'client1');
 
       expect(result).toEqual({
@@ -4073,7 +4098,7 @@ describe('FileBasedSyncAdapterService', () => {
       });
 
       // Seeds the sync-cycle cache with the CORRUPT primary's rev.
-      await adapter.downloadOps(0);
+      await applyDownload(0);
       await adapter.uploadOps([createMockSyncOp()], 'client1');
 
       expect(uploadedPaths()).toContain(C.OPS_FILE);
@@ -4350,6 +4375,7 @@ describe('FileBasedSyncAdapterService', () => {
         [C.STATE_FILE]: addPrefix(makeStateFile({ syncVersion: 1 }), 3),
       });
 
+      await applyDownload(5);
       await adapter.uploadOps([createMockSyncOp()], 'client1');
 
       // Compaction builds a fresh snapshot.
@@ -4375,6 +4401,7 @@ describe('FileBasedSyncAdapterService', () => {
         encryptedCfg,
         'test-password',
       );
+      await applyDownload(5, encryptedAdapter);
 
       await expectAsync(
         encryptedAdapter.uploadOps([createMockSyncOp()], 'client1'),
@@ -4413,6 +4440,7 @@ describe('FileBasedSyncAdapterService', () => {
 
       // Two consecutive op-bearing syncs, each appending one op (1201, then 1202) —
       // both still under MAX_RECENT_OPS, so neither may rebuild the snapshot.
+      await applyDownload(5);
       for (let sync = 0; sync < 2; sync++) {
         await adapter.uploadOps([createMockSyncOp({ id: `op-${sync}` })], 'client1');
       }
@@ -4505,6 +4533,7 @@ describe('FileBasedSyncAdapterService', () => {
         [C.OPS_FILE]: addPrefix(makeOpsFile({ syncVersion: 2000, recentOps }), 3),
         [C.STATE_FILE]: addPrefix({ ...makeStateFile(), version: 4 }, 4),
       });
+      await applyDownload(2000);
 
       await expectAsync(
         adapter.uploadOps([createMockSyncOp({ id: 'fresh-op' })], 'client1'),
@@ -4784,6 +4813,11 @@ describe('FileBasedSyncAdapterService', () => {
           3,
         ),
       });
+      // This client wrote the marker before restarting, so it has seen that rev.
+      (service as unknown as { _lastSeenRevs: Map<string, string> })._lastSeenRevs.set(
+        mockProvider.id,
+        `${C.OPS_FILE}-rev`,
+      );
 
       await adapter.uploadOps([createMockSyncOp()], 'client1');
 
@@ -5092,6 +5126,7 @@ describe('FileBasedSyncAdapterService', () => {
       });
       routeDownloads({ [C.OPS_FILE]: addPrefix(existing, 3) });
 
+      await applyDownload(3);
       await adapter.uploadOps([createMockSyncOp()], 'client1');
 
       const paths = uploadedPaths();
@@ -5124,6 +5159,7 @@ describe('FileBasedSyncAdapterService', () => {
       });
 
       const result = await adapter.downloadOps(1, 'client2');
+      await adapter.setLastServerSeq(result.latestSeq);
 
       expect(result.ops.some((o) => o.op.id === 'op-from-bak')).toBe(true);
       expect(mockSnackService.open).toHaveBeenCalled();

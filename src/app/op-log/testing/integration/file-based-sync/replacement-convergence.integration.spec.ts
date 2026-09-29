@@ -33,11 +33,13 @@ const STORAGE_KEY = FILE_BASED_SYNC_CONSTANTS.SYNC_VERSION_STORAGE_KEY_PREFIX + 
 const SEEDS_PER_VARIANT = 40;
 const STEPS = 40;
 /**
- * Known gap #10258: without a recorded clock (upgrade-restart) a device cannot
- * judge a snapshot base, so it misses a masked replacement instead of risking
- * a conflict dialog on every first sync after upgrading.
+ * Seeds whose upgrade-restart keeps its recorded clock, because dropping it
+ * would hit known gap #10258: without a recorded clock a device cannot judge a
+ * snapshot base, so it misses a masked replacement instead of risking a
+ * conflict dialog on every first sync after upgrading. Everything else in these
+ * seeds still runs. Return them to the no-clock path once #10258 is fixed.
  */
-const NO_CLOCK_SEEDS = [32];
+const NO_CLOCK_SEEDS = [32, 39];
 
 interface Device {
   id: string;
@@ -312,6 +314,7 @@ for (const isUseSplitSyncFiles of [false, true]) {
       };
 
       const runSeed = async (seed: number): Promise<void> => {
+        const keepsClock = NO_CLOCK_SEEDS.includes(seed);
         const random = createRandom(seed);
         const pick = <T>(items: readonly T[]): T =>
           items[Math.floor(random() * items.length)];
@@ -351,7 +354,7 @@ for (const isUseSplitSyncFiles of [false, true]) {
             if (action === 'expire') expireCaches(device);
             if (action === 'keepLocal') await keepLocal(device);
             if (action === 'restart' || action === 'upgrade') {
-              await restart(device, action === 'upgrade');
+              await restart(device, action === 'upgrade' && !keepsClock);
             }
           });
         }
@@ -379,8 +382,7 @@ for (const isUseSplitSyncFiles of [false, true]) {
       };
 
       for (let seed = 1; seed <= SEEDS_PER_VARIANT; seed++) {
-        const isKnownGap = NO_CLOCK_SEEDS.includes(seed);
-        (isKnownGap ? xit : it)(`converges for seed ${seed}`, () => runSeed(seed));
+        it(`converges for seed ${seed}`, () => runSeed(seed));
       }
     });
   }
