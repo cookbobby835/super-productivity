@@ -4758,9 +4758,9 @@ describe('FileBasedSyncAdapterService', () => {
     // Released 18.14–19.1 readers apply a snapshot's Surgical sync value and
     // default a missing one to false. A v3 snapshot without true makes them
     // drop the setting they just turned on to read it, so they are asked again.
-    for (const source of ['snapshot upload', 'migration'] as const) {
-      it(`(e) marks the ${source} snapshot as Surgical sync for released readers`, async () => {
-        if (source === 'migration') {
+    for (const source of ['an upload', 'a migration'] as const) {
+      it(`(e) marks the v3 snapshot from ${source} as Surgical sync for released readers`, async () => {
+        if (source === 'a migration') {
           const legacy = createMockSyncData({
             state: {
               globalConfig: { sync: { isEnabled: true, isUseSplitSyncFiles: false } },
