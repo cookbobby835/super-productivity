@@ -874,6 +874,7 @@ describe('RejectedOpsHandlerService', () => {
         supersededOperationResolverSpy.rebaseCommutingTimeDeltaRejections.and.resolveTo(
           new Set(['op-1']),
         );
+        const assertFence = jasmine.createSpy('assertFence');
 
         const result = await service.handleRejectedOps(
           [
@@ -885,8 +886,13 @@ describe('RejectedOpsHandlerService', () => {
             },
           ],
           downloadCallback,
+          assertFence,
         );
 
+        // The resolver re-asserts the cycle's sync epoch before its write.
+        expect(
+          supersededOperationResolverSpy.rebaseCommutingTimeDeltaRejections,
+        ).toHaveBeenCalledWith([jasmine.objectContaining({ opId: 'op-1' })], assertFence);
         expect(downloadCallback).toHaveBeenCalledTimes(1);
         expect(downloadCallback).not.toHaveBeenCalledWith(
           jasmine.objectContaining({ forceFromSeq0: true }),

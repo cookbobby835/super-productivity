@@ -52,6 +52,7 @@ import { UnsupportedMultiEntityConflictError } from '../core/errors/sync-errors'
 import {
   isCommutingTimeDeltaCrossing,
   isDisjointMergeEligible,
+  touchesCrossEntityTaskFields,
 } from './conflict-disjoint-merge.util';
 import { getPayloadKey } from '../core/entity-registry';
 
@@ -283,12 +284,20 @@ export class SupersededOperationResolverService {
    * and it still replays exactly once. The proof is the applied row whose clock
    * the server compared against, so no full re-download is needed.
    *
+   * Only ops this upload got rejected move, and no other tab uploads meanwhile
+   * (UPLOAD lock). Any other pending op may be one another tab uploaded and has
+   * not marked synced yet; moving it would turn its re-upload into an
+   * INVALID_OP_ID.
+   *
+   * @param assertFence re-asserts the sync cycle's epoch before the write (#9074)
    * @returns ids of the rebased ops; they stay pending and need an upload
    */
   async rebaseCommutingTimeDeltaRejections(
     rejectedOps: SupersededOperation[],
+    assertFence?: (context: string) => void,
   ): Promise<Set<string>> {
     const rebasedOpIds = new Set<string>();
+    const rejectedOpIds = new Set(rejectedOps.map(({ opId }) => opId));
     const rejectedByTask = new Map<string, SupersededOperation[]>();
     for (const item of rejectedOps) {
       const { op, existingClock } = item;
@@ -318,7 +327,12 @@ export class SupersededOperationResolverService {
       return rebasedOpIds;
     }
 
-    await this.lockService.request(LOCK_NAMES.OPERATION_LOG, async () => {
+    // UPLOAD before OPERATION_LOG, the order the upload service takes them in.
+    const underLocks = (work: () => Promise<void>): Promise<void> =>
+      this.lockService.request(LOCK_NAMES.UPLOAD, () =>
+        this.lockService.request(LOCK_NAMES.OPERATION_LOG, work),
+      );
+    await underLocks(async () => {
       const clientId = await this.clientIdProvider.loadClientId();
       const pendingEntries = (await this.opLogStore.getUnsynced()).filter(
         ({ op }) =>
@@ -343,20 +357,31 @@ export class SupersededOperationResolverService {
         // against a crossing delta it accepts this client's own delta and each
         // op dominating it. Receivers apply the moved ops after those, so they
         // must commute, or a second rename would lose to the first everywhere.
+        // Any entity type counts: a planner move declares the task it moves.
         const acceptedLaterOps = tail
           .filter(
             ({ seq, op, source, syncedAt }) =>
               source === 'local' &&
               syncedAt !== undefined &&
               seq > (taskEntries[0]?.seq ?? Infinity) &&
-              op.entityType === 'TASK' &&
               getOpEntityIds(op).includes(taskId),
           )
           .map(({ op }) => op);
         let clockToDominate: VectorClock = {};
         const isProven =
           pendingOps.every(
-            (op) => op.clientId === clientId && getOpEntityIds(op).length === 1,
+            (op) =>
+              rejectedOpIds.has(op.id) &&
+              op.clientId === clientId &&
+              getOpEntityIds(op).length === 1,
+          ) &&
+          // Ops of other entity types write these task fields too, where no
+          // check here sees them (deleting a tag rewrites every task's tagIds).
+          // A moved op touching one could land on the wrong side of such a write.
+          !touchesCrossEntityTaskFields(
+            [...pendingOps, ...acceptedLaterOps],
+            payloadKey,
+            taskId,
           ) &&
           (acceptedLaterOps.length === 0 ||
             isDisjointMergeEligible({
@@ -387,6 +412,7 @@ export class SupersededOperationResolverService {
         if (!isProven) {
           continue;
         }
+        assertFence?.('time-delta rejection rebase');
         const rebased = await this.opLogStore.rebasePendingLocalOps(
           pendingOps.map((op) => op.id),
           clockToDominate,

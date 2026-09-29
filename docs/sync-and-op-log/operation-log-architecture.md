@@ -1078,18 +1078,33 @@ that applied remote row, every pending op of the task moves past it in place
 and payload, fresh clock. A replacement op would replay a `syncTimeSpent` delta
 twice (the rejected original still replays, or a snapshot already holds it), and
 an LWW snapshot would turn the delta into an absolute write over a third
-device's concurrent time. None of those ids is stored on the server: the rejected
-ops were refused, the other pending ops were captured after the upload started,
-and duplicates are marked synced before rejection handling. The applied row is
-the causal proof, so no seq-0 re-download is needed. A raised counter of an op
-the state cache covers is written into the cache clock too, because boot rebuilds
-the durable clock from that clock plus the op tail. Receivers apply the moved
-ops after any later op of the task the server already accepted from this client
-(next to a crossing delta it accepts this client's own delta and then each later
-op, which dominates it), so the move also requires the moved ops to commute with
-those (`isDisjointMergeEligible`). Otherwise the snapshot path runs instead: a
-moved first rename would win over an accepted second rename on every other
-device.
+device's concurrent time. The applied row is the causal proof, so no seq-0
+re-download is needed. The snapshot path runs instead unless every condition
+below holds:
+
+- **Every moved op was rejected by this upload**, which stored none of them on
+  the server. Any other pending op may be one that another tab uploaded and has
+  not marked synced yet (acknowledgements are deferred past piggyback
+  processing). The move also holds the UPLOAD lock, so no other tab uploads
+  meanwhile.
+- **Moved ops commute with every later op of the task the server already
+  accepted from this client** (`isDisjointMergeEligible`). Next to a crossing
+  delta the server accepts this client's own delta and then each later op, which
+  dominates it. Receivers apply the moved ops after those, so a moved first
+  rename would win over an accepted second rename. Ops of any entity type that
+  declare the task count, such as a planner move.
+- **Neither side touches `tagIds`, `projectId`, `parentId`, `dueDay` or
+  `dueWithTime`** (`touchesCrossEntityTaskFields`). Ops of other entity types
+  write those fields in their reducers without declaring the task (deleting a
+  tag rewrites every task's `tagIds`), so no check here sees them. A moved tag
+  assignment would land after a tag deletion and revive the deleted tag.
+
+A raised counter of an op the state cache covers is written into the cache clock
+too, because boot rebuilds the durable clock from that clock plus the op tail.
+Snapshot saves and compaction clear the per-tab clock cache before they read the
+clock, so no tab writes a state cache that misses a counter another tab raised
+in place. The write re-asserts the sync epoch first (see "The sync-epoch fence"
+in the contributor sync model).
 
 ### Archive-Wins Rule
 

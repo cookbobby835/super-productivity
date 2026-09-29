@@ -11,7 +11,7 @@ import { SnackService } from '../../../core/snack/snack.service';
 import { CLIENT_ID_PROVIDER } from '../../util/client-id.provider';
 import { buildEntityRegistry, ENTITY_REGISTRY } from '../../core/entity-registry';
 import { PersistentAction } from '../../core/persistent-action.interface';
-import { EntityConflict, Operation } from '../../core/operation.types';
+import { EntityConflict, Operation, OpType } from '../../core/operation.types';
 import { convertOpToAction } from '../../apply/operation-converter.util';
 import {
   removeTimeSpent,
@@ -546,7 +546,13 @@ describe('round-time conflict convergence integration (#8944)', () => {
   // pending task-time work and keeps the pending ops, whose clocks then miss
   // the remote op, so the real server rejects them. The rejection must move
   // them past it in place: no absolute snapshot, time counted once on replay.
-  for (const shape of ['delta', 'rename', 'delta+notes', 'delta+rename'] as const) {
+  for (const shape of [
+    'delta',
+    'rename',
+    'delta+notes',
+    'delta+rename',
+    'delta+tags',
+  ] as const) {
     it(`rebases a rejected pending ${shape} crossing a remote edit in place (#10214)`, async () => {
       const capture = TestBed.inject(OperationCaptureService);
       const resolver = TestBed.inject(ConflictResolutionService);
@@ -554,6 +560,8 @@ describe('round-time conflict convergence integration (#8944)', () => {
       const clientA = new TestClient(CLIENT_A);
       const clientB = new TestClient(CLIENT_B);
       const commutes = shape !== 'delta+rename';
+      // Commutes with the rename, but deleting a tag rewrites tagIds unseen.
+      const rebases = commutes && shape !== 'delta+tags';
 
       const localActions: PersistentAction[] = [];
       if (shape !== 'rename') {
@@ -575,7 +583,12 @@ describe('round-time conflict convergence integration (#8944)', () => {
           TaskSharedActions.updateTask({
             task: {
               id: TASK_X,
-              changes: shape === 'delta+notes' ? { notes: 'A notes' } : { title: 'A' },
+              changes:
+                shape === 'delta+notes'
+                  ? { notes: 'A notes' }
+                  : shape === 'delta+tags'
+                    ? { tagIds: ['tag1'] }
+                    : { title: 'A' },
             },
           }) as PersistentAction,
         );
@@ -630,7 +643,7 @@ describe('round-time conflict convergence integration (#8944)', () => {
       expect(pendingAfter.map(({ seq, op }) => [seq, op.id, op.payload])).toEqual(
         pendingBefore.map(({ seq, op }) => [seq, op.id, op.payload]),
       );
-      if (!commutes) {
+      if (!rebases) {
         expect(rebased.size).toBe(0);
         expect(pendingAfter.map(({ op }) => op.vectorClock)).toEqual(
           pendingBefore.map(({ op }) => op.vectorClock),
@@ -683,6 +696,89 @@ describe('round-time conflict convergence integration (#8944)', () => {
       }
       expect(taskSyncProjection(restartedState, TASK_X)).toEqual(
         taskSyncProjection(localState, TASK_X),
+      );
+    });
+  }
+
+  // A rebasable crossing (the 'delta+notes' shape above) that one guard stops:
+  // a pending op of the task this upload did not get rejected may be another
+  // tab's accepted but unacknowledged upload; a changed sync epoch fences the
+  // write; an accepted later op of another entity type declaring the task (a
+  // planner move) writes task fields no task-level check sees.
+  for (const guard of [
+    'unrejected pending op',
+    'epoch change',
+    'accepted planner move',
+  ] as const) {
+    it(`does not rebase a rejected crossing past an ${guard} (#10214)`, async () => {
+      const capture = TestBed.inject(OperationCaptureService);
+      const server = new MockSyncServer();
+      const clientA = new TestClient(CLIENT_A);
+      const clientB = new TestClient(CLIENT_B);
+
+      const localActions = [
+        syncTimeSpent({ taskId: TASK_X, date: DAY, duration: 2 * MINUTE }),
+        TaskSharedActions.updateTask({
+          task: { id: TASK_X, changes: { notes: 'A notes' } },
+        }),
+      ] as PersistentAction[];
+      for (const [i, action] of localActions.entries()) {
+        await opLogStore.appendWithVectorClockOverwrite(
+          captureOperation(action, clientA, capture, 1_000 + i),
+          'local',
+        );
+      }
+      const remoteOp = captureOperation(
+        TaskSharedActions.updateTask({
+          task: { id: TASK_X, changes: { title: 'B' } },
+        }) as PersistentAction,
+        clientB,
+        capture,
+        2_000,
+      );
+      expect(uploadLikeServer(server, [remoteOp], CLIENT_B)).toEqual([]);
+      await opLogStore.append(remoteOp, 'remote');
+      await opLogStore.mergeRemoteOpClocks([remoteOp]);
+
+      const pendingBefore = await opLogStore.getUnsynced();
+      const rejected = uploadLikeServer(
+        server,
+        pendingBefore.map(({ op }) => op),
+        CLIENT_A,
+      );
+      expect(rejected.length).toBe(2);
+      let items = rejected.map((op) => ({
+        opId: op.id,
+        op,
+        existingClock: remoteOp.vectorClock,
+      }));
+      if (guard === 'unrejected pending op') {
+        items = items.slice(0, 1);
+      } else if (guard === 'accepted planner move') {
+        const move = clientA.createOperation({
+          actionType: '[Planner] Transfer Task',
+          opType: OpType.Move,
+          entityType: 'PLANNER',
+          entityId: TASK_X,
+          payload: { actionPayload: {}, entityChanges: [] },
+        });
+        await opLogStore.appendWithVectorClockOverwrite(move, 'local');
+        await opLogStore.markSynced([await opLogStore.getLastSeq()]);
+      }
+      const resolver = TestBed.inject(SupersededOperationResolverService);
+      const rebase = resolver.rebaseCommutingTimeDeltaRejections(items, () => {
+        if (guard === 'epoch change') {
+          throw new Error('sync epoch changed');
+        }
+      });
+
+      if (guard === 'epoch change') {
+        await expectAsync(rebase).toBeRejectedWithError('sync epoch changed');
+      } else {
+        expect((await rebase).size).toBe(0);
+      }
+      expect((await opLogStore.getUnsynced()).map(({ op }) => op.vectorClock)).toEqual(
+        pendingBefore.map(({ op }) => op.vectorClock),
       );
     });
   }
