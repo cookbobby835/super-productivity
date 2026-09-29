@@ -253,4 +253,105 @@ test.describe('@webdav a late snapshot-only folder is loaded before uploading', 
       await closeContextsSafely(joining.context);
     }
   });
+
+  // A synced device moves to an empty folder. Its download finds nothing, so
+  // the server-migration check reads the folder again before seeding it. If
+  // another device's seed lands in between, that check skips seeding, and the
+  // download's cursor commit also records the unapplied seed as seen. The
+  // upload's own check then asks before replacing the server data; Cancel
+  // promises to download the server's data instead. That must hold even when
+  // the answer comes after the 30 s cycle cache expired.
+  for (const isUseSplitSyncFiles of [false, true]) {
+    test(`does not extend a seed after a late answer to the server-migration prompt (split=${isUseSplitSyncFiles})`, async ({
+      browser,
+      baseURL,
+      request,
+    }) => {
+      const format = isUseSplitSyncFiles ? 'v3' : 'v2';
+      const seedFolder = generateSyncFolderName(`migration-prompt-${format}`);
+      const ownFolder = `${seedFolder}-own`;
+      const folder = `${seedFolder}-target`;
+      const remote = `${root}${folder}/DEV/`;
+      const primary = isUseSplitSyncFiles ? 'sync-ops.json' : 'sync-data.json';
+      const movedRemote = await seedSnapshotOnlyFolder(
+        browser,
+        baseURL,
+        request,
+        seedFolder,
+        `Seeded prompt task ${folder}`,
+        isUseSplitSyncFiles,
+      );
+      const seededFiles: Record<string, string> = {};
+      const files = isUseSplitSyncFiles
+        ? ['sync-ops.json', 'sync-state.json', 'sync-data.json']
+        : ['sync-data.json'];
+      for (const file of files) {
+        seededFiles[file] = await remoteText(request, `${movedRemote}${file}`);
+      }
+
+      await createSyncFolder(request, ownFolder);
+      await createSyncFolder(request, folder);
+      await createSyncFolder(request, `${folder}/DEV`);
+      const mover = await setupSyncClient(browser, baseURL);
+      try {
+        const sync = new SyncPage(mover.page);
+        const work = new WorkViewPage(mover.page);
+        await work.waitForTaskList();
+        await keepSyncManual(mover.page);
+        await work.addTask(`Mover synced task ${folder}`);
+        await waitForStatePersistence(mover.page);
+        const config = { ...WEBDAV_CONFIG_TEMPLATE, isUseSplitSyncFiles };
+        await sync.setupWebdavSync({ ...config, syncFolderPath: `/${ownFolder}` });
+        expect(await waitForSyncComplete(mover.page, sync)).toBe('success');
+        const localTitle = `Mover pending task ${folder}`;
+        await work.addTask(localTitle);
+        await waitForStatePersistence(mover.page);
+
+        let primaryReads = 0;
+        let published = false;
+        await mover.page.route(`**/${folder}/DEV/${primary}`, async (route) => {
+          if (route.request().method() === 'GET' && ++primaryReads === 2) {
+            // The download found no data; the seed lands before the
+            // server-migration check reads the folder.
+            for (const [file, data] of Object.entries(seededFiles)) {
+              const put = await request.put(`${remote}${file}`, {
+                headers: { Authorization: authorization },
+                data,
+              });
+              expect(put.ok()).toBe(true);
+            }
+            published = true;
+          }
+          await route.continue();
+        });
+        await sync.setupWebdavSync(
+          { ...config, syncFolderPath: `/${folder}` },
+          { isReconfigure: true },
+        );
+        const prompt = mover.page.locator('dialog-server-migration-confirm');
+        await expect(prompt).toBeVisible();
+        expect(published).toBe(true);
+
+        // Answer after the cycle cache expired.
+        await mover.page.clock.setFixedTime(new Date(Date.now() + 31_000));
+        await prompt.getByRole('button', { name: 'Cancel', exact: true }).click();
+        await expect(prompt).toBeHidden();
+        await expect(sync.syncSpinner).toBeHidden();
+
+        for (const [file, data] of Object.entries(seededFiles)) {
+          expect(await remoteText(request, `${remote}${file}`)).toBe(data);
+        }
+        await expect(
+          mover.page.locator('task').filter({ hasText: localTitle }),
+        ).toBeVisible();
+
+        await expectNextSyncToAskFirst(mover.page, sync);
+        expect(await remoteText(request, `${remote}${primary}`)).toBe(
+          seededFiles[primary],
+        );
+      } finally {
+        await closeContextsSafely(mover.context);
+      }
+    });
+  }
 });

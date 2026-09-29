@@ -688,5 +688,24 @@ for (const isUseSplitSyncFiles of [false, true]) {
         await expectFirstUploadDeferredUntilApplied();
       });
     }
+
+    // A synced device's download finds its new folder empty, so the download
+    // path's server-migration check reads the folder again. When the seed has
+    // landed by then, that check skips seeding and the download commits its
+    // empty cursor, which also records the unapplied seed as seen. The upload's
+    // own check reads the seed once more and asks before replacing server data.
+    // An answer given after the 30 s cycle cache must still not extend it.
+    it('retries an upload onto a seed read by server-migration checks after the cache expired', async () => {
+      const empty = await linux.downloadOps(0, ownClientId);
+      expect(empty.latestSeq).toBe(0);
+      await seedSnapshotFromOtherDevice();
+      expect((await linux.downloadOps(0, undefined, 1)).latestSeq).toBe(1);
+      await linux.setLastServerSeq(empty.latestSeq);
+      expect((await linux.downloadOps(0, undefined, 1)).latestSeq).toBe(1);
+      const realNow = Date.now();
+      spyOn(Date, 'now').and.returnValue(realNow + 60_000);
+
+      await expectFirstUploadDeferredUntilApplied();
+    });
   });
 }
