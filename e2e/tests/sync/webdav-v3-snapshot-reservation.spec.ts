@@ -108,6 +108,9 @@ test.describe('@webdav v3 snapshot creation reserves the legacy file', () => {
         .locator('snack-custom', { hasText: SPLIT_FORMAT_NOTICE })
         .isVisible();
 
+      // The witness armed by A's save can time out while its write is held, so
+      // arm one for the seed's remaining commit-point write.
+      syncA.prepareForNextSyncCycle('write');
       releaseSnapshotWrite!();
       await waitForSyncComplete(a.page, syncA);
 
