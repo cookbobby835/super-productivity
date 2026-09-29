@@ -332,8 +332,8 @@ test.describe('@webdav automatic file format rollout', () => {
         await waitForSyncComplete(b.page, syncB);
         await expect(b.page.locator('task').filter({ hasText: original })).toBeVisible();
         if (choice === 'migrate') {
-          // First hydrate the existing config, then explicitly opt into migration.
-          // The format option is synced, so joining may restore the remote false.
+          // Join with Surgical sync saved off first, then explicitly opt into
+          // migration. The choice is per device, so joining keeps the saved off.
           await syncB.setupWebdavSync(
             { ...config, isUseSplitSyncFiles: true },
             { isReconfigure: true },

@@ -75,6 +75,11 @@ test.describe('@webdav Surgical sync is a per-device choice', () => {
         authorization,
       );
       expect(ops.version).toBe(3);
+      // Released 18.14–19.1 readers apply the snapshot's value and read a
+      // missing one as off, so the migrated snapshot must say on.
+      const migrated = await readPrefixedFile<{
+        state: { globalConfig: { sync: { isUseSplitSyncFiles?: boolean } } };
+      }>(request, `${remote}sync-state.json`, authorization);
 
       // B still has Surgical sync off, so it stops at the upgraded folder and
       // shows the notice. It must not join with a choice it never made.
@@ -83,6 +88,15 @@ test.describe('@webdav Surgical sync is a per-device choice', () => {
         () => true,
         () => false,
       );
+      const showsNotice = await b.page
+        .locator('snack-custom .message')
+        .filter({ hasText: /split-file format.*Surgical sync/i })
+        .first()
+        .waitFor({ timeout: 5000 })
+        .then(
+          () => true,
+          () => false,
+        );
       await syncB.syncBtn.click({ button: 'right' });
       const dialog = b.page.locator('mat-dialog-container');
       await syncB.expandAdvancedSettings();
@@ -91,9 +105,16 @@ test.describe('@webdav Surgical sync is a per-device choice', () => {
         .isChecked();
       await dialog.locator('mat-dialog-actions button[mat-button]').click();
       await expect(dialog).toBeHidden();
-      expect({ joinedSilently, surgicalSyncOn }).toEqual({
+      expect({
+        joinedSilently,
+        showsNotice,
+        surgicalSyncOn,
+        migratedSnapshotChoice: migrated.state.globalConfig.sync.isUseSplitSyncFiles,
+      }).toEqual({
         joinedSilently: false,
+        showsNotice: true,
         surgicalSyncOn: false,
+        migratedSnapshotChoice: true,
       });
     } finally {
       await closeContextsSafely(a.context, b?.context);

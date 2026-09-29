@@ -1111,6 +1111,34 @@ describe('SyncHydrationService', () => {
       }
     });
 
+    // v3 snapshots say Surgical sync is on, for released 18.14–19.1 readers. A
+    // device without a saved choice follows the folder, so neither the loaded
+    // state nor the saved snapshot may keep that mark: the next start would load
+    // it as this device's own choice.
+    it('keeps an absent Surgical sync choice absent when the snapshot says on', async () => {
+      mockStore.select.and.returnValue(of(defaultLocalSyncConfig));
+
+      await service.hydrateFromRemoteSync({
+        task: {},
+        globalConfig: {
+          sync: { ...DEFAULT_GLOBAL_CONFIG.sync, isUseSplitSyncFiles: true },
+        },
+      });
+
+      const dispatchedAction = mockStore.dispatch.calls.mostRecent()
+        .args[0] as unknown as ReturnType<typeof loadAllData>;
+      const dispatchedSync = (
+        dispatchedAction.appDataComplete.globalConfig as Record<string, unknown>
+      )['sync'] as Record<string, unknown>;
+      const savedState = getCommittedBaseline().state as Record<string, unknown>;
+      const savedSync = (savedState['globalConfig'] as Record<string, unknown>)[
+        'sync'
+      ] as Record<string, unknown>;
+      expect(defaultLocalSyncConfig.isUseSplitSyncFiles).toBeUndefined();
+      expect(dispatchedSync['isUseSplitSyncFiles']).toBeUndefined();
+      expect(savedSync['isUseSplitSyncFiles']).toBeUndefined();
+    });
+
     it('should preserve local settings in both snapshot and dispatch', async () => {
       mockStore.select.and.returnValue(
         of({

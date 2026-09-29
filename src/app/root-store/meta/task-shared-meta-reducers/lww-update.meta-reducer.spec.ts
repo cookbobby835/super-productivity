@@ -1574,6 +1574,7 @@ describe('lwwUpdateMetaReducer', () => {
           syncInterval: 600000,
           isManualSyncOnly: true,
           isCompressionEnabled: false,
+          isUseSplitSyncFiles: false,
         },
       } as never;
       const action = {
@@ -1586,6 +1587,7 @@ describe('lwwUpdateMetaReducer', () => {
           syncInterval: 300000,
           isManualSyncOnly: false,
           isCompressionEnabled: true,
+          isUseSplitSyncFiles: true,
         },
         meta: {
           isPersistent: true,
@@ -1613,6 +1615,7 @@ describe('lwwUpdateMetaReducer', () => {
           syncInterval: 600000,
           isManualSyncOnly: true,
           isCompressionEnabled: true,
+          isUseSplitSyncFiles: false,
         }),
       );
     });
@@ -1640,6 +1643,7 @@ describe('lwwUpdateMetaReducer', () => {
           syncInterval: 900000,
           isManualSyncOnly: false,
           isCompressionEnabled: true,
+          isUseSplitSyncFiles: true,
         },
         meta: {
           isPersistent: true,
@@ -1665,6 +1669,7 @@ describe('lwwUpdateMetaReducer', () => {
           syncInterval: 900000,
           isManualSyncOnly: false,
           isCompressionEnabled: true,
+          isUseSplitSyncFiles: true,
         }),
       );
     });
