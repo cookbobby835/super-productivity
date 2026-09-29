@@ -51,9 +51,9 @@ const ONEDRIVE_DEFAULTS = {
 } as const;
 
 // Allowlist of Microsoft Graph sovereign hosts. `_request` accepts absolute
-// URLs (for @odata.nextLink pass-through), but the request carries the user's
-// Bearer token — sending it to an attacker-controlled host would leak the
-// token. A tampered or spoofed nextLink with any other host throws instead.
+// URLs (for @odata.nextLink pass-through; no caller passes one since listFiles
+// was removed), but the request carries the user's Bearer token — sending it to
+// an attacker-controlled host would leak the token. Any other host throws.
 const ONEDRIVE_GRAPH_HOSTS: ReadonlySet<string> = new Set([
   'graph.microsoft.com',
   'graph.microsoft.us',

@@ -576,6 +576,49 @@ describe('OneDrive', () => {
     expect(refreshCallCount).toBe(1);
   });
 
+  // `_request` still accepts an absolute URL (written for @odata.nextLink
+  // pass-through) and attaches the user's Bearer token to it. No public method
+  // passes one since listFiles was removed, so pin the host guard directly.
+  describe('_request with an absolute URL', () => {
+    type RequestSeam = {
+      _request: (options: { method: 'GET'; path: string }) => Promise<Response>;
+    };
+    const requestAbsolute = (url: string): Promise<Response> =>
+      (provider as unknown as RequestSeam)._request({ method: 'GET', path: url });
+
+    beforeEach(() => {
+      // A fresh expiry, so no token refresh request runs before the guard.
+      cfgStoreSpy.load.and.resolveTo({
+        ...baseCfg,
+        tokenExpiresAt: Date.now() + tokenExpiryMs,
+      });
+      fetchSpy.and.resolveTo({ ok: true, status: 200, text: async () => '' } as Response);
+    });
+
+    it('sends a sovereign-cloud Graph URL verbatim with the Bearer token', async () => {
+      const url =
+        'https://graph.microsoft.us/v1.0/me/drive/special/approot/children?skiptoken=abc';
+
+      await requestAbsolute(url);
+
+      expect(fetchSpy).toHaveBeenCalledOnceWith(url, jasmine.any(Object));
+      const init = fetchSpy.calls.mostRecent().args[1] as RequestInit;
+      expect(new Headers(init.headers).get('Authorization')).toBe('Bearer access-token');
+    });
+
+    for (const url of [
+      'https://attacker.example.com/steal',
+      'https://graph.microsoft.com.attacker.example/steal',
+      'https://graph.microsoft.com@attacker.example.com/steal',
+      'http://graph.microsoft.com/v1.0/cleartext',
+    ]) {
+      it(`refuses to send the Bearer token to ${url}`, async () => {
+        await expectAsync(requestAbsolute(url)).toBeRejectedWithError(/non-Graph host/);
+        expect(fetchSpy).not.toHaveBeenCalled();
+      });
+    }
+  });
+
   // #9546: the WebView fetch (CapacitorWebFetch) sends an `Origin` header,
   // which Entra treats as cross-origin token redemption and rejects with
   // AADSTS90023 for "Mobile and desktop" (native) registrations. On native
