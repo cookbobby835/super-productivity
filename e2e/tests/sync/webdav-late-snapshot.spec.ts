@@ -1,4 +1,4 @@
-import type { APIRequestContext, Browser } from '@playwright/test';
+import type { APIRequestContext, Browser, Page } from '@playwright/test';
 import { expect, test } from '../../fixtures/webdav.fixture';
 import { SyncPage } from '../../pages/sync.page';
 import { WorkViewPage } from '../../pages/work-view.page';
@@ -23,6 +23,35 @@ const remoteText = async (request: APIRequestContext, url: string): Promise<stri
 
 const parsePrefixed = <T>(encoded: string): T =>
   JSON.parse(encoded.slice(encoded.indexOf('__') + 2)) as T;
+
+/** Only the test starts syncs after setup, so no automatic cycle interleaves. */
+const keepSyncManual = (page: Page): Promise<void> =>
+  page.evaluate(() => {
+    const helpers = (
+      window as unknown as {
+        __e2eTestHelpers: { store: { dispatch: (action: unknown) => void } };
+      }
+    ).__e2eTestHelpers;
+    helpers.store.dispatch({
+      type: '[Global Config] Update Global Config Section',
+      sectionKey: 'sync',
+      sectionCfg: { isManualSyncOnly: true },
+    });
+  });
+
+/**
+ * A deferred upload is not a dead end: the next sync downloads the remote data
+ * first and, with local data on both sides, asks. Cancelling keeps both.
+ */
+const expectNextSyncToAskFirst = async (page: Page, sync: SyncPage): Promise<void> => {
+  await expect(sync.syncErrorIcon).toBeHidden();
+  await sync.triggerSync();
+  expect(await waitForSyncComplete(page, sync)).toBe('conflict');
+  const dialog = page.locator('dialog-sync-conflict');
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(sync.syncSpinner).toBeHidden();
+};
 
 /**
  * A synced device that moves to an empty folder seeds it with a
@@ -107,6 +136,7 @@ test.describe('@webdav a late snapshot-only folder is loaded before uploading', 
       const localTitle = `Pending joiner task ${folder}`;
       await work.addTask(localTitle);
       await waitForStatePersistence(joining.page);
+      await keepSyncManual(joining.page);
       let legacyReads = 0;
       let published = false;
       await joining.page.route(`**/${folder}/DEV/sync-data.json`, async (route) => {
@@ -134,6 +164,9 @@ test.describe('@webdav a late snapshot-only folder is loaded before uploading', 
       await expect(
         joining.page.locator('task').filter({ hasText: localTitle }),
       ).toBeVisible();
+
+      await expectNextSyncToAskFirst(joining.page, sync);
+      expect(await remoteText(request, `${remote}sync-data.json`)).toBe(snapshotOnly);
     } finally {
       await closeContextsSafely(joining.context);
     }
@@ -175,6 +208,7 @@ test.describe('@webdav a late snapshot-only folder is loaded before uploading', 
       const localTitle = `Pending split joiner task ${folder}`;
       await work.addTask(localTitle);
       await waitForStatePersistence(joining.page);
+      await keepSyncManual(joining.page);
       let published = false;
       await joining.page.route(`**/${folder}/DEV/sync-data.json`, async (route) => {
         if (route.request().method() === 'GET' && !published) {
@@ -210,6 +244,11 @@ test.describe('@webdav a late snapshot-only folder is loaded before uploading', 
       await expect(
         joining.page.locator('task').filter({ hasText: localTitle }),
       ).toBeVisible();
+
+      await expectNextSyncToAskFirst(joining.page, sync);
+      expect(await remoteText(request, `${remote}sync-ops.json`)).toBe(
+        seededFiles['sync-ops.json'],
+      );
     } finally {
       await closeContextsSafely(joining.context);
     }

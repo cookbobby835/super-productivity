@@ -621,6 +621,52 @@ for (const isUseSplitSyncFiles of [false, true]) {
       await expectLinuxStillGetsRegressedOpAfterUpload(3);
     });
 
+    /** Another device seeds the folder with a full-state SERVER_MIGRATION import. */
+    const seedSnapshotFromOtherDevice = async (): Promise<void> => {
+      const seeder = 'seeding-client';
+      await newAdapter().uploadSnapshot(
+        createValidAppData(),
+        seeder,
+        'initial',
+        { [seeder]: 1 },
+        CURRENT_SCHEMA_VERSION,
+        false,
+        'seed-import',
+        false,
+        'SYNC_IMPORT',
+        'SERVER_MIGRATION',
+      );
+    };
+
+    /**
+     * Linux's first upload must wait, write nothing and keep its cursor. Once
+     * the next cycle's download is applied, the same upload goes through.
+     */
+    const expectFirstUploadDeferredUntilApplied = async (): Promise<void> => {
+      const linuxFirst = taskOp(
+        'linux-first',
+        ownClientId,
+        ActionType.TASK_SHARED_ADD,
+        OpType.Create,
+        'linux-task',
+        { actionPayload: {}, entityChanges: [] },
+        { [ownClientId]: 1 },
+      );
+      const path = isUseSplitSyncFiles ? 'sync-ops.json' : 'sync-data.json';
+      const before = remote.getFileContent(path);
+      await expectAsync(linuxUploads(linuxFirst)).toBeRejectedWithError(
+        UploadRevToMatchMismatchAPIError,
+      );
+      expect(remote.getFileContent(path)).toEqual(before);
+      expect(await linux.getLastServerSeq()).toBe(0);
+
+      const next = await linux.downloadOps(0, ownClientId);
+      expect(next.snapshotState).toBeDefined();
+      await linux.setLastServerSeq(next.latestSeq);
+      await linuxUploads(linuxFirst);
+      expect(remote.getFileContent(path)).not.toEqual(before);
+    };
+
     // A fresh device found an empty folder. Another device then seeds it with a
     // full-state snapshot (SYNC_IMPORT) before the fresh device uploads. The
     // snapshot carries no retained ops, so the #10256 guard does not fire, and
@@ -633,41 +679,13 @@ for (const isUseSplitSyncFiles of [false, true]) {
         expect(empty.latestSeq).toBe(0);
         await linux.setLastServerSeq(empty.latestSeq);
 
-        const seeder = 'seeding-client';
-        await newAdapter().uploadSnapshot(
-          createValidAppData(),
-          seeder,
-          'initial',
-          { [seeder]: 1 },
-          CURRENT_SCHEMA_VERSION,
-          false,
-          'seed-import',
-          false,
-          'SYNC_IMPORT',
-          'SERVER_MIGRATION',
-        );
+        await seedSnapshotFromOtherDevice();
         if (readBeforeUpload === 'unapplied probe') {
           // The server-migration check reads the folder without applying it.
           expect((await linux.downloadOps(0, undefined, 1)).latestSeq).toBe(1);
         }
 
-        const path = isUseSplitSyncFiles ? 'sync-ops.json' : 'sync-data.json';
-        const before = remote.getFileContent(path);
-        await expectAsync(
-          linuxUploads(
-            taskOp(
-              'linux-first',
-              ownClientId,
-              ActionType.TASK_SHARED_ADD,
-              OpType.Create,
-              'linux-task',
-              { actionPayload: {}, entityChanges: [] },
-              { [ownClientId]: 1 },
-            ),
-          ),
-        ).toBeRejectedWithError(UploadRevToMatchMismatchAPIError);
-        expect(remote.getFileContent(path)).toEqual(before);
-        expect(await linux.getLastServerSeq()).toBe(0);
+        await expectFirstUploadDeferredUntilApplied();
       });
     }
   });
