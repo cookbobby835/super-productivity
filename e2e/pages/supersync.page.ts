@@ -228,7 +228,7 @@ export class SuperSyncPage extends BasePage {
     this.freshClientConfirmBtn = this.freshClientDialog.locator(
       'button[mat-flat-button]',
     );
-    // Local-data conflict dialog elements
+    // Whole-dataset conflict dialog elements (see conflictDialog)
     this.conflictDialog = page.locator('dialog-sync-conflict');
     this.conflictUseLocalBtn = this.conflictDialog.locator('button', {
       hasText: /Keep local/i,
@@ -1702,7 +1702,8 @@ export class SuperSyncPage extends BasePage {
 
   /**
    * Trigger a manual sync via the sync button and wait for it to complete.
-   * Does not handle dialogs - use syncAndWait() for normal operation.
+   * Waits with syncAndWait()'s default dialog handling, so the whole-dataset
+   * conflict dialog fails it too; it cannot opt in to answering that dialog.
    *
    * @internal Use syncAndWait() instead for most cases
    */
@@ -1718,6 +1719,7 @@ export class SuperSyncPage extends BasePage {
   /**
    * Wait for an ongoing sync operation to complete.
    * Useful when sync is triggered automatically (e.g., after data changes).
+   * Fails if the whole-dataset conflict dialog appears, like triggerSync().
    *
    * @param options.timeout - Maximum time to wait (default: 15000ms)
    * @param options.skipSpinnerCheck - If true, only waits for check icon (useful when sync might already be in progress)
@@ -1854,6 +1856,11 @@ export class SuperSyncPage extends BasePage {
    * overwrite warning either choice may raise (see
    * confirmSyncConflictOverwriteIfShown). For tests that assert on the dialog
    * themselves; syncAndWait() never answers it unless given `conflictDialog`.
+   *
+   * Returns once the dialog is closed, not once the forced upload/download it
+   * starts has finished. After a multi-entity stop the sync status stays ERROR
+   * until then, so wait for `syncErrorIcon` to clear before syncing again. The
+   * double checkmark only returns after the next normal cycle.
    */
   async resolveConflictDialog(choice: ConflictDialogChoice): Promise<void> {
     await expect(this.conflictDialog).toBeVisible({ timeout: 5000 });
@@ -1886,6 +1893,30 @@ export class SuperSyncPage extends BasePage {
   }
 
   /**
+   * Runs after an opted-in answer. Two things stand between the closed dialog and
+   * the state the completion loop waits for:
+   * - The multi-entity stop sets the sync status to ERROR BEFORE it opens the
+   *   dialog, and the forced upload/download the answer starts only clears it once
+   *   it has finished. The dialog is already closed by then and no spinner shows,
+   *   so without this wait the loop reads the leftover error icon as a failed sync.
+   *   The first-sync stop sets no error, so it passes straight through.
+   * - That forced sync ends in IN_SYNC but never marks the remote as checked, so
+   *   the double checkmark the loop waits for stays away until one more normal
+   *   cycle has run, and nothing else starts one in time.
+   */
+  private async _finishConflictResolution(): Promise<void> {
+    try {
+      await this.syncErrorIcon.waitFor({ state: 'hidden', timeout: 60000 });
+    } catch (error) {
+      throw new Error(
+        'Sync still reports an error 60s after the whole-dataset conflict dialog was answered',
+        { cause: error },
+      );
+    }
+    await this._triggerSuperSyncCycle(30000);
+  }
+
+  /**
    * Handle any sync-blocking dialogs (Angular Material or native).
    * Returns true if a dialog was handled, false otherwise. Throws if the
    * whole-dataset conflict dialog is up and `conflictDialog` was not given.
@@ -1913,6 +1944,7 @@ export class SuperSyncPage extends BasePage {
         `[syncAndWait] Whole-dataset conflict dialog detected, keeping ${conflictDialog} data (opted in)...`,
       );
       await this.resolveConflictDialog(conflictDialog);
+      await this._finishConflictResolution();
       return true;
     }
 
@@ -2182,6 +2214,8 @@ export class SuperSyncPage extends BasePage {
    *   Does not answer the whole-dataset dialog: see `conflictDialog`.
    * @param options.conflictDialog - Explicit opt-in to answer the whole-dataset conflict
    *   dialog by keeping 'local' or 'remote' data. Omit it and that dialog fails the sync.
+   *   After answering it waits for the forced upload/download to finish and runs one more
+   *   normal cycle, as a test would by hand, so the sync ends confirmed.
    * @param options.timeout - Maximum time to wait for sync (default: 30000ms)
    */
   async syncAndWait(
