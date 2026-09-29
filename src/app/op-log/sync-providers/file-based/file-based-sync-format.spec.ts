@@ -35,7 +35,11 @@ const remoteFolder = (files: Record<string, string>): FileSyncProvider<SyncProvi
  * double. SafBridgePlugin.writeFile deletes the file, creates it empty, then
  * writes it, so a killed write leaves the file missing or empty.
  */
-const androidLocalFolder = (files: Map<string, string>): LocalFileSyncAndroid =>
+const androidLocalFolder = (
+  files: Map<string, string>,
+): FileSyncProvider<SyncProviderId> =>
+  // The package types its id as the 'LocalFile' literal; the app's provider type
+  // uses SyncProviderId.LocalFile, which is the same string.
   new LocalFileSyncAndroid({
     logger: NOOP_SYNC_LOGGER,
     fileAdapter: {
@@ -56,7 +60,7 @@ const androidLocalFolder = (files: Map<string, string>): LocalFileSyncAndroid =>
       selectFolder: async () => 'content://folder',
       checkPermission: async () => true,
     },
-  });
+  }) as unknown as FileSyncProvider<SyncProviderId>;
 
 describe('discoverFileSyncFormat', () => {
   it('reports a folder without sync files as empty', async () => {
@@ -79,7 +83,7 @@ describe('discoverFileSyncFormat', () => {
 
   for (const killedAfter of ['delete', 'create'] as const) {
     it(`keeps an Android local folder on v2 when a write was killed after the ${killedAfter}`, async () => {
-      const files = new Map([[C.BACKUP_FILE, V2_BACKUP]]);
+      const files = new Map<string, string>([[C.BACKUP_FILE, V2_BACKUP]]);
       if (killedAfter === 'create') files.set(C.SYNC_FILE, '');
       expect(await discoverFileSyncFormat(androidLocalFolder(files))).toBe('v2');
     });
