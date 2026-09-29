@@ -5309,12 +5309,15 @@ describe('FileBasedSyncAdapterService', () => {
         expect(parseWithPrefix(files.get(C.SYNC_FILE)!)).toEqual(
           jasmine.objectContaining({ version: 3, format: 'split' }),
         );
-        expect(parseWithPrefix(files.get(C.OPS_FILE)!).version).toBe(3);
+        const ops = parseWithPrefix(
+          files.get(C.OPS_FILE)!,
+        ) as unknown as FileBasedOpsFile;
+        expect(ops.version).toBe(3);
       });
 
       it('publishes nothing when a v2 client creates sync-data.json first', async () => {
         const acknowledgedV2 = addPrefix(
-          createMockSyncData({ clientId: 'v2-client', vectorClock: { 'v2-client': 1 } }),
+          createMockSyncData({ clientId: 'v2Client', vectorClock: { v2Client: 1 } }),
         );
         // The v2 client commits after this client's emptiness checks, just before
         // its first write, and has already been told its upload succeeded.
@@ -5334,7 +5337,7 @@ describe('FileBasedSyncAdapterService', () => {
         // this client's full-state re-seed.
         files.clear();
         revs.clear();
-        const v2 = addPrefix(createMockSyncData({ clientId: 'v2-client' }));
+        const v2 = addPrefix(createMockSyncData({ clientId: 'v2Client' }));
         put(C.SYNC_FILE, v2);
 
         expect(await seedFolder()).toBe('not accepted');
