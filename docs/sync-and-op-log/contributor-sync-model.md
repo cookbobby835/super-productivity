@@ -243,6 +243,36 @@ added (measured 2026-09 in
 
 ---
 
+## Fix intake — evidence before a fix
+
+Most sync fix code has come from our own audits, not from users. Of the 45
+largest sync fixes between the op-log merge (2026-01-11) and 2026-09-26, 27
+(+10.9k production lines) came from audit findings and hardening passes and 11
+(+4.0k) from user reports (measured 2026-09 in
+[the architecture review](../plans/2026-09-26-sync-architecture-review.md)
+§2.2). A fix in this area tends to reveal the next edge case, so fixing
+everything an analysis can find keeps the fix rate high without evidence that
+users are harmed.
+
+A sync fix lands only for one of:
+
+- **A user report** of the problem.
+- **A regression on unreleased master** (`git tag --contains <commit>` prints
+  nothing). Revert the change that introduced it first, unless the revert
+  brings back a bug that a released version has; then fix forward with the
+  narrowest change.
+- **Data loss, a sync stop, or permanent content divergence** on a path that
+  released clients or default settings take, shown by a reproduction: an E2E,
+  or a fuzz seed that fails on every replay. Order-only differences, and
+  disagreement that the next sync repairs, do not qualify.
+
+Everything else found by audits, reviews, fuzzing or reading code becomes an
+issue with the reproduction and the affected path, not a PR. Among fixes that
+qualify, prefer the one that removes a special case or adds the least ongoing
+machinery, and say in the PR which category the fix meets.
+
+---
+
 ## Clearing a field — `undefined` does not survive the wire (#9776)
 
 **Never rely on `changes: { someField: undefined }` reaching another device.**
