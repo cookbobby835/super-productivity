@@ -67,6 +67,10 @@ import { TabSeqFrontierService } from './tab-seq-frontier.service';
 import { CompactOperation } from './compact/compact-operation.types';
 import { isCompactOperation, encodeOperation } from './compact/operation-codec.service';
 import {
+  LegacyTerminalRemoteFailuresMigrationEntry,
+  OpLogMetaEntry,
+  RawRebuildIncompleteEntry,
+  RawRebuildRecoveryEntry,
   ReplayAnchorSnapshot,
   StateCacheEntry,
   StoredOperationLogEntry,
@@ -74,6 +78,7 @@ import {
   decodeStoredEntry,
   getOpId,
   getStoredOpType,
+  isPendingLocalEntryOf,
 } from './operation-log-store-rows';
 import { LockService } from '../sync/lock.service';
 import { rebaseLocalClockOnDurable } from './operation-log-clock.util';
@@ -97,29 +102,6 @@ export type {
   ImportBackupReason,
   ImportBackupCaptureMeta,
 } from './import-backup-ring.util';
-
-export interface RawRebuildIncompleteEntry {
-  incomplete: true;
-  startedAt: number;
-  preservedLocalOps: Operation[];
-  backupRef?: ImportBackupRef;
-}
-
-export interface RawRebuildRecoveryEntry {
-  backupId: string;
-  backupSavedAt: number;
-  completedAt: number;
-}
-
-interface LegacyTerminalRemoteFailuresMigrationEntry {
-  version: number;
-}
-
-type OpLogMetaEntry =
-  | FullStateOpsMetaEntry
-  | RawRebuildIncompleteEntry
-  | RawRebuildRecoveryEntry
-  | LegacyTerminalRemoteFailuresMigrationEntry;
 
 /**
  * Calculates the durable clock after a reducer-committed remote batch.
@@ -1323,12 +1305,10 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
   }
 
   /**
-   * Moves pending local operations causally past `clockToDominate` IN PLACE:
-   * id, seq and payload stay, and each op takes the next counter on the durable
-   * clock in seq order. A re-appended copy would replay additive reducers
-   * (`syncTimeSpent`) twice — the rejected original still replays, or a
-   * snapshot already holds its effect. Only for ops the server rejected (so
-   * never stored); the caller holds the OPERATION_LOG lock.
+   * Moves pending local ops past `clockToDominate` IN PLACE, in seq order: id, seq
+   * and payload stay, so an additive `syncTimeSpent` replays once. Only for ops the
+   * server never stored; caller holds OPERATION_LOG. Rebases nothing if a row is no
+   * longer a pending op of this client (e.g. another tab synced it).
    */
   async rebasePendingLocalOps(
     opIds: readonly string[],
@@ -1336,13 +1316,16 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
   ): Promise<Operation[]> {
     await this._ensureInit();
     const clientId = await this.clientIdProvider.loadClientId();
-    if (!clientId) {
-      throw new Error('Cannot rebase local operations without a current client ID.');
-    }
+    if (!clientId) return [];
     const rebased: Operation[] = [];
     let committedClock: VectorClock | undefined;
     await this._adapter.transaction(
-      [STORE_NAMES.OPS, STORE_NAMES.VECTOR_CLOCK],
+      [
+        STORE_NAMES.OPS,
+        STORE_NAMES.VECTOR_CLOCK,
+        STORE_NAMES.STATE_CACHE,
+        STORE_NAMES.META,
+      ],
       'readwrite',
       async (tx) => {
         const entries: StoredOperationLogEntry[] = [];
@@ -1352,39 +1335,54 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
             OPS_INDEXES.BY_ID,
             opId,
           );
-          if (
-            entry?.source !== 'local' ||
-            entry.syncedAt !== undefined ||
-            entry.rejectedAt !== undefined ||
-            entry.reducerRejectedAt !== undefined ||
-            decodeStoredEntry(entry).op.clientId !== clientId
-          ) {
-            throw new Error(`Cannot rebase ${opId}: not a pending op of this client`);
+          if (!isPendingLocalEntryOf(entry, clientId)) {
+            return;
           }
           entries.push(entry);
         }
-        const clockEntry = await tx.get<VectorClockEntry>(
-          STORE_NAMES.VECTOR_CLOCK,
+        const cache = await tx.get<StateCacheEntry>(
+          STORE_NAMES.STATE_CACHE,
           SINGLETON_KEY,
         );
-        let clock = clockEntry?.clock ?? {};
+        let clock =
+          (await tx.get<VectorClockEntry>(STORE_NAMES.VECTOR_CLOCK, SINGLETON_KEY))
+            ?.clock ?? {};
+        let coveredCounter = 0;
         for (const entry of entries.sort((a, b) => a.seq - b.seq)) {
           clock = rebaseLocalClockOnDurable(clock, clockToDominate, clientId);
           const op: Operation = { ...decodeStoredEntry(entry).op, vectorClock: clock };
           await tx.put(STORE_NAMES.OPS, { ...entry, op: encodeOperation(op) });
           rebased.push(op);
+          if (cache && entry.seq <= cache.lastAppliedOpSeq)
+            coveredCounter = clock[clientId];
         }
+        // Boot rebuilds the durable clock from the cache clock plus the op tail.
+        if (cache && coveredCounter > (cache.vectorClock[clientId] ?? 0)) {
+          await tx.put(STORE_NAMES.STATE_CACHE, {
+            ...cache,
+            vectorClock: { ...cache.vectorClock, [clientId]: coveredCounter },
+          });
+        }
+        committedClock = boundRebasedClock(
+          clock,
+          clientId,
+          await this._getLatestFullStateAuthorInTx(tx),
+        );
         await tx.put(
           STORE_NAMES.VECTOR_CLOCK,
-          { clock, lastUpdate: Date.now() } satisfies VectorClockEntry,
+          { clock: committedClock, lastUpdate: Date.now() } satisfies VectorClockEntry,
           SINGLETON_KEY,
         );
-        committedClock = clock;
       },
     );
-    this._vectorClockCache = committedClock ? { ...committedClock } : null;
+    if (committedClock) this._vectorClockCache = { ...committedClock };
     this._invalidateUnsyncedCache();
     return rebased;
+  }
+
+  /** Drops this tab's unsynced cache, which cannot see another tab's rebases. */
+  invalidateUnsyncedCache(): void {
+    this._invalidateUnsyncedCache();
   }
 
   /**

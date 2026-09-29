@@ -288,10 +288,28 @@ export class SupersededOperationResolverService {
     const rebasedOpIds = new Set<string>();
     const rejectedByTask = new Map<string, SupersededOperation[]>();
     for (const item of rejectedOps) {
-      const taskId = item.op.entityType === 'TASK' ? item.op.entityId : undefined;
-      if (taskId && getOpEntityIds(item.op).length === 1) {
-        rejectedByTask.set(taskId, [...(rejectedByTask.get(taskId) ?? []), item]);
+      const { op, existingClock } = item;
+      if (
+        existingClock &&
+        compareVectorClocks(op.vectorClock, existingClock) ===
+          VectorClockComparison.GREATER_THAN
+      ) {
+        // Rebased already (e.g. by another tab) and this tab sent a stale cached
+        // copy: the stored op is accepted once the cache is dropped.
+        rebasedOpIds.add(item.opId);
+      } else if (
+        op.entityType === 'TASK' &&
+        op.entityId &&
+        getOpEntityIds(op).length === 1
+      ) {
+        rejectedByTask.set(op.entityId, [
+          ...(rejectedByTask.get(op.entityId) ?? []),
+          item,
+        ]);
       }
+    }
+    if (rebasedOpIds.size > 0) {
+      this.opLogStore.invalidateUnsyncedCache();
     }
     if (rejectedByTask.size === 0) {
       return rebasedOpIds;
@@ -299,13 +317,24 @@ export class SupersededOperationResolverService {
 
     await this.lockService.request(LOCK_NAMES.OPERATION_LOG, async () => {
       const clientId = await this.clientIdProvider.loadClientId();
-      const context = buildSectionCausalReplayContext(
-        await this.opLogStore.getOpsAfterSeq(0),
+      const pendingEntries = (await this.opLogStore.getUnsynced()).filter(
+        ({ op }) =>
+          op.entityType === 'TASK' &&
+          getOpEntityIds(op).some((id) => rejectedByTask.has(id)),
       );
-      const pendingByEntity = await this.opLogStore.getUnsyncedByEntity();
+      if (pendingEntries.length === 0) {
+        return;
+      }
+      // A pending op concurrent with an applied row was captured before that
+      // row was appended, so only the tail after the oldest one can hold it.
+      const context = buildSectionCausalReplayContext(
+        await this.opLogStore.getOpsAfterSeq(pendingEntries[0].seq),
+      );
       for (const [taskId, items] of rejectedByTask) {
         // Seq order; every pending op of the task moves so their clocks keep it.
-        const pendingOps = pendingByEntity.get(toEntityKey('TASK', taskId)) ?? [];
+        const pendingOps = pendingEntries
+          .filter(({ op }) => getOpEntityIds(op).includes(taskId))
+          .map(({ op }) => op);
         let clockToDominate: VectorClock = {};
         const isProven =
           pendingOps.every(

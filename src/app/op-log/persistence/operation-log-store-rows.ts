@@ -4,6 +4,8 @@
  */
 import { Operation, OperationLogEntry, VectorClock } from '../core/operation.types';
 import { CompactOperation } from './compact/compact-operation.types';
+import type { FullStateOpsMetaEntry } from './full-state-ops-meta';
+import type { ImportBackupRef } from './import-backup-ring.util';
 import { decodeOperation, isCompactOperation } from './compact/operation-codec.service';
 
 /**
@@ -49,6 +51,17 @@ export const getOpId = (op: Operation | CompactOperation): string => {
   return op.id;
 };
 
+/** A local row of `clientId` that is still pending: not synced, rejected or quarantined. */
+export const isPendingLocalEntryOf = (
+  entry: StoredOperationLogEntry | undefined,
+  clientId: string,
+): entry is StoredOperationLogEntry =>
+  entry?.source === 'local' &&
+  entry.syncedAt === undefined &&
+  entry.rejectedAt === undefined &&
+  entry.reducerRejectedAt === undefined &&
+  decodeStoredEntry(entry).op.clientId === clientId;
+
 export const getStoredOpType = (op: Operation | CompactOperation): string =>
   isCompactOperation(op) ? op.o : op.opType;
 
@@ -86,3 +99,26 @@ export interface ReplayAnchorSnapshot {
   compactedAt: number;
   schemaVersion?: number;
 }
+
+export interface RawRebuildIncompleteEntry {
+  incomplete: true;
+  startedAt: number;
+  preservedLocalOps: Operation[];
+  backupRef?: ImportBackupRef;
+}
+
+export interface RawRebuildRecoveryEntry {
+  backupId: string;
+  backupSavedAt: number;
+  completedAt: number;
+}
+
+export interface LegacyTerminalRemoteFailuresMigrationEntry {
+  version: number;
+}
+
+export type OpLogMetaEntry =
+  | FullStateOpsMetaEntry
+  | RawRebuildIncompleteEntry
+  | RawRebuildRecoveryEntry
+  | LegacyTerminalRemoteFailuresMigrationEntry;

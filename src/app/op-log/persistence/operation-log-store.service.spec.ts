@@ -1846,15 +1846,36 @@ describe('OperationLogStoreService', () => {
       expect(await service.getVectorClock()).toEqual({ testClient: 8, remote: 3 });
     });
 
-    it('should refuse to rebase an op that is no longer pending', async () => {
+    it('should rebase nothing when an op is no longer pending', async () => {
       const op = createTestOperation({ id: 'rebase-synced' });
       await service.append(op, 'local');
       await service.markSynced([(await service.getOpsAfterSeq(0))[0].seq]);
 
-      await expectAsync(
-        service.rebasePendingLocalOps([op.id], { remote: 1 }),
-      ).toBeRejectedWithError(/Cannot rebase rebase-synced/);
+      expect(await service.rebasePendingLocalOps([op.id], { remote: 1 })).toEqual([]);
       expect((await service.getOpsAfterSeq(0))[0].op.vectorClock).toEqual(op.vectorClock);
+    });
+
+    it('should keep the counter of a rebased op the state cache covers', async () => {
+      const covered = createTestOperation({
+        id: 'covered',
+        vectorClock: { testClient: 5 },
+      });
+      const tail = createTestOperation({ id: 'tail', vectorClock: { testClient: 6 } });
+      await service.appendWithVectorClockOverwrite(covered, 'local');
+      await service.saveStateCache({
+        state: {},
+        lastAppliedOpSeq: await service.getLastSeq(),
+        vectorClock: { testClient: 5 },
+        compactedAt: 1,
+        schemaVersion: 1,
+      });
+      await service.appendWithVectorClockOverwrite(tail, 'local');
+
+      await service.rebasePendingLocalOps([covered.id, tail.id], { remote: 3 });
+
+      // Boot restores this clock and merges the tail (the tail op carries 8),
+      // so no later op can reuse the covered op's new counter.
+      expect((await service.loadStateCache())?.vectorClock).toEqual({ testClient: 7 });
     });
   });
 

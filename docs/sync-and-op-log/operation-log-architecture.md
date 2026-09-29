@@ -1073,8 +1073,12 @@ that applied remote row, every pending op of the task moves past it in place
 and payload, fresh clock. A replacement op would replay a `syncTimeSpent` delta
 twice (the rejected original still replays, or a snapshot already holds it), and
 an LWW snapshot would turn the delta into an absolute write over a third
-device's concurrent time. The rejection proves the server never stored those
-ids and the applied row is the causal proof, so no seq-0 re-download is needed.
+device's concurrent time. None of those ids is stored on the server: the rejected
+ops were refused, the other pending ops were captured after the upload started,
+and duplicates are marked synced before rejection handling. The applied row is
+the causal proof, so no seq-0 re-download is needed. A raised counter of an op
+the state cache covers is written into the cache clock too, because boot rebuilds
+the durable clock from that clock plus the op tail.
 
 ### Archive-Wins Rule
 
