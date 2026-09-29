@@ -99,6 +99,7 @@ const OTHER_DATE = '2026-09-24';
 const families = [
   'project notes',
   'Today notes',
+  'tag notes',
   'habits',
   'habit date counts',
   'boards',
@@ -148,7 +149,12 @@ const actionsFor = (
         ids: IDS,
         activeContextType:
           family === 'project notes' ? WorkContextType.PROJECT : WorkContextType.TAG,
-        activeContextId: family === 'project notes' ? PROJECT : 'TODAY',
+        activeContextId:
+          family === 'project notes'
+            ? PROJECT
+            : family === 'tag notes'
+              ? 'tag1'
+              : 'TODAY',
       }),
       edit: updateNote({
         note: { id: IDS[0], changes: { content: 'preserved content' } },
@@ -398,16 +404,24 @@ describe('reorder conflicts: real store, applier, reducers and durable replay (#
     edit: PersistentAction;
     mutate?: (op: Operation) => Operation;
   }[] = [
-    {
-      name: 'note pinning',
-      family: 'project notes' as const,
+    ...(['Today notes', 'tag notes'] as const).map((family) => ({
+      name: family + ' order vs unpin',
+      family,
       edit: updateNote({
         note: {
           id: IDS[0],
           changes: { content: 'content plus membership', isPinnedToToday: false },
         },
       }),
-    },
+    })),
+    ...[
+      { name: 'note project move', changes: { projectId: 'other-project' } },
+      { name: 'note identity change', changes: { id: 'renamed' } },
+    ].map(({ name, changes }) => ({
+      name,
+      family: 'project notes' as const,
+      edit: updateNote({ note: { id: IDS[0], changes } }),
+    })),
     {
       name: 'competing note order',
       family: 'project notes' as const,
@@ -425,10 +439,10 @@ describe('reorder conflicts: real store, applier, reducers and durable replay (#
       }),
     },
     {
-      name: 'habit settings',
-      family: 'habits' as const,
-      edit: updateSimpleCounter({
-        simpleCounter: { id: IDS[0], changes: { isEnabled: false } },
+      name: 'section task placement',
+      family: 'sections' as const,
+      edit: updateSection({
+        section: { id: IDS[0], changes: { taskIds: ['placed-task'] } },
       }),
     },
     {
@@ -534,6 +548,74 @@ describe('reorder conflicts: real store, applier, reducers and durable replay (#
       expect((await db.getUnsynced()).map((row) => row.op.id)).toEqual([local.id]);
     });
   }
+
+  it('keeps the safety stop when one note has two pending membership writes', async () => {
+    // Both would be reissued as pins, which released receivers prepend twice.
+    const edits = [false, true].map((isPinnedToToday) =>
+      updateNote({ note: { id: IDS[0], changes: { isPinnedToToday } } }),
+    );
+    const locals = edits.map((edit, index) => ({
+      ...capture(edit, 'local', 1000 + index),
+      vectorClock: { local: index + 1 },
+    }));
+    for (const [index, edit] of edits.entries()) {
+      store.dispatch(edit);
+      await db.append(locals[index], 'local');
+    }
+    const before = await state();
+    const remote = capture(actionsFor('project notes').order, 'remote', 2000);
+    const resolver = TestBed.inject(ConflictResolutionService);
+    const detected = await resolver.checkOpForConflicts(remote, {
+      localPendingOpsByEntity: await db.getUnsyncedByEntity(),
+      appliedFrontierByEntity: new Map(),
+      retainedOpsByEntity: new Map(),
+      snapshotVectorClock: undefined,
+      snapshotEntityKeys: undefined,
+      hasNoSnapshotClock: true,
+    });
+    expect(detected.conflicts.length).toBeGreaterThan(0);
+    await expectAsync(
+      resolver.autoResolveConflictsLWW(detected.conflicts),
+    ).toBeRejectedWithError(UnsupportedMultiEntityConflictError);
+    expect(await state()).toEqual(before);
+    expect((await db.getUnsynced()).map((row) => row.op.id)).toEqual(
+      locals.map((op) => op.id),
+    );
+  });
+
+  it('keeps a pending unpin pending after its conflict evidence is compacted', async () => {
+    const unpin = updateNote({
+      note: { id: IDS[0], changes: { isPinnedToToday: false } },
+    });
+    const local = capture(unpin, 'local', 1000);
+    const remote = capture(actionsFor('project notes').order, 'remote', 2000);
+    store.dispatch(unpin);
+    await db.append(local, 'local');
+    await TestBed.inject(ConflictResolutionService).autoResolveConflictsLWW([], [remote]);
+    const before = await state();
+    expect(before.note.todayOrder).not.toContain(IDS[0]);
+    const snapshotClock = { ...local.vectorClock, ...remote.vectorClock };
+    await db.saveStateCache({
+      state: { ...before, project: before.projects } as unknown as AppDataComplete,
+      lastAppliedOpSeq: await db.getLastSeq(),
+      vectorClock: snapshotClock,
+      compactedAt: Date.now(),
+      schemaVersion: local.schemaVersion,
+    });
+    await db.deleteOpsWhere((row) => row.op.id === remote.id);
+    const retained = await db.getOpsAfterSeq(0);
+    // Entity LWW would carry isPinnedToToday but not the Today list write.
+    await expectAsync(
+      TestBed.inject(SupersededOperationResolverService).resolveSupersededLocalOps(
+        [{ opId: local.id, op: local, existingClock: remote.vectorClock }],
+        [remote.vectorClock],
+        snapshotClock,
+      ),
+    ).toBeRejectedWithError(UnsupportedMultiEntityConflictError);
+    expect(await db.getOpsAfterSeq(0)).toEqual(retained);
+    expect((await db.getUnsynced()).map((row) => row.op.id)).toEqual([local.id]);
+    expect(await state()).toEqual(before);
+  });
 
   it('keeps a disabled habit edit independent of the reissued enabled-only order', async () => {
     const pair = actionsFor('habits');
@@ -856,8 +938,60 @@ describe('reorder conflicts: real store, applier, reducers and durable replay (#
     name: string;
     seed?: IssueProvider;
     changes?: Partial<IssueProvider>;
+    /** Applied to the shared baseline first. */
+    prepare?: PersistentAction;
+    edit?: PersistentAction;
   }[] = [
     ...families.map((family) => ({ family, name: family })),
+    {
+      family: 'project notes',
+      name: 'project notes: unpin with content',
+      edit: updateNote({
+        note: {
+          id: IDS[0],
+          changes: { content: 'content plus membership', isPinnedToToday: false },
+        },
+      }),
+    },
+    {
+      family: 'project notes',
+      name: 'project notes: pin',
+      prepare: updateNote({ note: { id: IDS[0], changes: { isPinnedToToday: false } } }),
+      edit: updateNote({ note: { id: IDS[0], changes: { isPinnedToToday: true } } }),
+    },
+    ...(['project notes', 'Today notes', 'tag notes'] as const).map((family) => ({
+      family,
+      name: family + ': lock',
+      edit: updateNote({ note: { id: IDS[0], changes: { isLock: true } } }),
+    })),
+    {
+      family: 'sections',
+      name: 'sections: collapse',
+      edit: updateSection({ section: { id: IDS[0], changes: { isExpanded: false } } }),
+    },
+    {
+      family: 'habits',
+      name: 'habits: settings dialog disables',
+      // The dialog submits its whole normalized model, never a flag delta.
+      edit: updateSimpleCounter({
+        simpleCounter: {
+          id: IDS[0],
+          changes: {
+            title: 'renamed',
+            isEnabled: false,
+            isHideButton: true,
+            icon: 'timer',
+            type: SimpleCounterType.StopWatch,
+            isTrackStreaks: false,
+            streakMinValue: undefined,
+            streakMode: undefined,
+            streakWeekDays: undefined,
+            streakWeeklyFrequency: undefined,
+            countdownDuration: undefined,
+          },
+        },
+      }),
+    },
     {
       family: 'issue providers',
       name: 'issue providers: partial pinned search',
@@ -905,7 +1039,12 @@ describe('reorder conflicts: real store, applier, reducers and durable replay (#
               };
               resetProjection(initial);
             }
+            if (scenario.prepare) {
+              initial = reducer(initial, scenario.prepare);
+              resetProjection(initial);
+            }
             const pair = actionsFor(scenario.family);
+            if (scenario.edit) pair.edit = scenario.edit;
             if (scenario.changes) {
               pair.edit = IssueProviderActions.updateIssueProvider({
                 issueProvider: { id: IDS[0], changes: scenario.changes },
@@ -977,6 +1116,20 @@ describe('reorder conflicts: real store, applier, reducers and durable replay (#
               issueProvider: s.issueProvider,
             });
             expect(projection(converged)).toEqual(projection(expected));
+            for (const list of [
+              converged.note.todayOrder,
+              converged.projects.entities[PROJECT]!.noteIds,
+              converged.simpleCounter.ids,
+              converged.section.ids,
+              converged.boards.boardCfgs.map((board) => board.id),
+              converged.issueProvider.ids,
+            ])
+              expect(new Set(list).size).toBe(list.length);
+            if (scenario.family === 'habits') {
+              expect(converged.simpleCounter.entities[IDS[0]]!.type).toBe(
+                SimpleCounterType.StopWatch,
+              );
+            }
             if (scenario.family === 'habit date counts') {
               const habit = converged.simpleCounter.entities[IDS[0]]!;
               expect(habit.countOnDay).toEqual({ [EDIT_DATE]: 3, [OTHER_DATE]: 7 });

@@ -43,7 +43,7 @@ import { TagState } from '../../features/tag/tag.model';
 import { Task } from '../../features/tasks/task.model';
 import {
   areCommutingReorderAndContentOperations,
-  isContentReorderOperation,
+  requiresCausalReplay,
   isReorderConflictOperation,
   projectReorderConflictAgainstState,
   ReorderReplaySnapshot,
@@ -406,9 +406,9 @@ export class SupersededOperationResolverService {
         }
 
         // Compaction can remove the applied conflict row while retaining the
-        // unsynced reorder. Entity LWW cannot carry that list write: keep it pending.
+        // unsynced reorder/pin. Entity LWW cannot carry that list write: keep it pending.
         if (
-          isContentReorderOperation(item.op) &&
+          requiresCausalReplay(item.op) &&
           !projectedSectionOp &&
           !projectedWorkContextState
         ) {
