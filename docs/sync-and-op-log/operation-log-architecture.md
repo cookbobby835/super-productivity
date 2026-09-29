@@ -787,7 +787,8 @@ interrupted-write and legacy-overwrite follow-ups land. Discovery ignores v16
 `LegacySyncFormatDetectedError`, and a confirmed force overwrite writes the
 empty-folder format. Saved `isUseSplitSyncFiles: false` keeps v2 behavior;
 `true` explicitly opts into migration. Provider errors never establish
-emptiness, and neither does a missing primary next to its `.bak`: an
+emptiness, except on Android local folders, whose folder API reports a failed
+query as a missing file. Neither does a missing primary next to its `.bak`: an
 interrupted write (Android writes delete, create, then write) can leave only the
 backup of an existing folder. Discovery is target-scoped, in memory, and does
 not persist a choice.
