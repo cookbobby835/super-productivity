@@ -4755,6 +4755,42 @@ describe('FileBasedSyncAdapterService', () => {
       expect(bak.version).toBe(C.SPLIT_FILE_VERSION);
     });
 
+    // Released 18.14–19.1 readers apply a snapshot's Surgical sync value and
+    // default a missing one to false. A v3 snapshot without true makes them
+    // drop the setting they just turned on to read it, so they are asked again.
+    for (const source of ['snapshot upload', 'migration'] as const) {
+      it(`(e) marks the ${source} snapshot as Surgical sync for released readers`, async () => {
+        if (source === 'migration') {
+          const legacy = createMockSyncData({
+            state: {
+              globalConfig: { sync: { isEnabled: true, isUseSplitSyncFiles: false } },
+            },
+          });
+          routeDownloads({ [C.SYNC_FILE]: addPrefix(legacy, 2) });
+          await adapter.uploadOps([createMockSyncOp()], 'client1');
+        } else {
+          routeDownloads({});
+          await adapter.uploadSnapshot(
+            { globalConfig: { sync: { isEnabled: true } } },
+            'client1',
+            'recovery',
+            { client1: 1 },
+            1,
+            undefined,
+            'op-id-split-snap',
+          );
+        }
+
+        const stateCall = mockProvider.uploadFile.calls
+          .allArgs()
+          .find(([path]) => path === C.STATE_FILE)!;
+        const written = parseWithPrefix(stateCall[1] as string) as unknown as {
+          state: { globalConfig: { sync: { isUseSplitSyncFiles?: boolean } } };
+        };
+        expect(written.state.globalConfig.sync.isUseSplitSyncFiles).toBe(true);
+      });
+    }
+
     it('(e2) resumes a pending migration marker after restart before appending ops', async () => {
       const legacy = createMockSyncData({
         syncVersion: 7,

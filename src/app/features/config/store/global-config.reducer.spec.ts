@@ -807,6 +807,55 @@ describe('GlobalConfigReducer', () => {
       });
     });
 
+    // Surgical sync decides this device's file format: absent follows the remote
+    // folder, false keeps v2, true migrates. Other devices' snapshots must not
+    // rewrite it; a snapshot from a device without a saved choice lacks the key.
+    describe('Surgical sync choice during sync hydration', () => {
+      const hydrate = (
+        local: boolean | undefined,
+        remote: boolean | undefined,
+      ): boolean | undefined => {
+        const oldState: GlobalConfigState = {
+          ...initialGlobalConfigState,
+          sync: {
+            ...initialGlobalConfigState.sync,
+            syncProvider: SyncProviderId.WebDAV,
+            isUseSplitSyncFiles: local,
+          },
+        };
+        const snapshotSync: Record<string, unknown> = {
+          ...initialGlobalConfigState.sync,
+          syncProvider: null,
+        };
+        if (remote === undefined) {
+          delete snapshotSync['isUseSplitSyncFiles'];
+        } else {
+          snapshotSync['isUseSplitSyncFiles'] = remote;
+        }
+        return globalConfigReducer(
+          oldState,
+          loadAllData({
+            appDataComplete: {
+              globalConfig: { ...initialGlobalConfigState, sync: snapshotSync },
+            } as unknown as AppDataComplete,
+          }),
+        ).sync.isUseSplitSyncFiles;
+      };
+
+      it('keeps a saved v2 choice when the snapshot has none', () => {
+        expect(hydrate(false, undefined)).toBe(false);
+      });
+
+      it('keeps a saved v3 choice when the snapshot has none', () => {
+        expect(hydrate(true, undefined)).toBe(true);
+      });
+
+      it('keeps following the remote format when the snapshot has a choice', () => {
+        expect(hydrate(undefined, true)).toBeUndefined();
+        expect(hydrate(undefined, false)).toBeUndefined();
+      });
+    });
+
     describe('focusMode migration: isSyncSessionWithTracking → autoStartFocusOnPlay', () => {
       // Real persisted JSON never carries `autoStartFocusOnPlay` (it didn't
       // exist pre-rework). Constructing the fixture as an Object.assign so the
@@ -1084,6 +1133,28 @@ describe('GlobalConfigReducer', () => {
       expect(result.sync.isEncryptionEnabled).toBe(true);
       expect(result.sync.syncInterval).toBe(300000);
       expect(result.sync.isManualSyncOnly).toBe(true);
+    });
+
+    it("does not apply another device's Surgical sync choice", () => {
+      const oldState: GlobalConfigState = {
+        ...initialGlobalConfigState,
+        sync: {
+          ...initialGlobalConfigState.sync,
+          syncProvider: SyncProviderId.WebDAV,
+          isUseSplitSyncFiles: false,
+        },
+      };
+      const remoteAction = updateGlobalConfigSection({
+        sectionKey: 'sync',
+        sectionCfg: { isUseSplitSyncFiles: true },
+      });
+
+      const result = globalConfigReducer(oldState, {
+        ...remoteAction,
+        meta: { ...remoteAction.meta, isRemote: true, isApplyingFromOtherClient: true },
+      });
+
+      expect(result.sync.isUseSplitSyncFiles).toBe(false);
     });
 
     it('should update shared sync settings for remote sync section updates', () => {
