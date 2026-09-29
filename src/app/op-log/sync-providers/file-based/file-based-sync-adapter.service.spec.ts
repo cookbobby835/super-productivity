@@ -444,7 +444,8 @@ describe('FileBasedSyncAdapterService', () => {
       expect([...files.keys()].sort()).toEqual([C.BACKUP_FILE, C.SYNC_FILE].sort());
     });
 
-    for (const path of [C.OPS_FILE, C.SYNC_FILE]) {
+    // A failed backup probe must not read as "no backup, empty folder" either.
+    for (const path of [C.OPS_FILE, C.SYNC_FILE, C.OPS_BACKUP_FILE, C.BACKUP_FILE]) {
       it(`propagates a discovery error at ${path} without writing`, async () => {
         const failure = new AuthFailSPError('Authentication failed (HTTP 401)');
         mockProvider.getFileRev.and.callFake(async (file: string) => {

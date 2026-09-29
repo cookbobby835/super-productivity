@@ -43,6 +43,8 @@ export const EMPTY_FOLDER_SYNC_FORMAT: 'v2' | 'v3' = 'v2';
  * still report it on normal syncs, and a confirmed force overwrite replaces it.
  * A backup without its primary counts: an interrupted write (Android writes
  * delete, create, then write) can leave only the `.bak` of an existing folder.
+ * The ops backup goes first: a v3 migration leaves a tombstone in
+ * `sync-data.json.bak`.
  */
 export const discoverFileSyncFormat = async (
   provider: Provider,

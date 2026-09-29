@@ -81,6 +81,15 @@ describe('discoverFileSyncFormat', () => {
     ).toBe('v3');
   });
 
+  // A v2 to v3 migration leaves a v3 tombstone in sync-data.json.bak.
+  it('keeps a migrated split folder with only its backups on v3', async () => {
+    expect(
+      await discoverFileSyncFormat(
+        remoteFolder({ [C.OPS_BACKUP_FILE]: 'pf_3__{}', [C.BACKUP_FILE]: 'pf_3__{}' }),
+      ),
+    ).toBe('v3');
+  });
+
   for (const killedAfter of ['delete', 'create'] as const) {
     it(`keeps an Android local folder on v2 when a write was killed after the ${killedAfter}`, async () => {
       const files = new Map<string, string>([[C.BACKUP_FILE, V2_BACKUP]]);
