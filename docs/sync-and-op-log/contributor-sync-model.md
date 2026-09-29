@@ -179,41 +179,67 @@ blessed pattern is a `task-shared-meta-reducers/` reducer.
 ## Conflict resolution — stay on generic paths
 
 Operations are replayed intents, but conflicts are detected and resolved per
-**declared** entity. An action whose reducer writes more than it declares (a
-parent's list, a sibling, another entity type) has no automatic resolution. It
-either needs hand-written compensation in `ConflictResolutionService`, or a
-crossing edit hits the fail-closed stop (`UnsupportedMultiEntityConflictError`),
-which ends in the whole-dataset "Keep local / Keep remote" dialog. That class
-was the largest single source of sync fix code: 51 fixes, ~7.4k net production
-lines and ~23.9k test lines (measured 2026-09, see
-[the architecture review](../plans/2026-09-26-sync-architecture-review.md) §2.2).
+**declared** entity (`getOpEntityIds`). That mismatch fails in two ways:
+
+- **Undeclared writes.** Conflict detection never sees a write the op does not
+  declare (a parent's list, a sibling, another entity type), and entity-level
+  LWW cannot restore it. Each such write that can meet a concurrent edit needs
+  hand-written compensation, or the devices diverge silently.
+- **The fail-closed stop.** An op that declares more than one entity id is a
+  multi-entity op (`isMultiEntityOperation`). When it meets a concurrent edit
+  of a declared entity and no resolution path admits it,
+  `_assertMultiEntityPlansAreSafe` throws `UnsupportedMultiEntityConflictError`.
+  Sync stops until the user picks a side in the whole-dataset "Keep local /
+  Keep remote" dialog.
+
+Multi-entity and intent conflict resolution is the largest root-cause category
+of sync fix code: 51 fixes, ~7.4k net production lines and ~23.9k test lines
+added (measured 2026-09 in
+[the architecture review](../plans/2026-09-26-sync-architecture-review.md)
+§2.2; an upper bound, as the category also caught generic LWW fixes).
 
 1. **Prefer a generic resolution path.** Route a conflict fix through an
-   existing generic mechanism instead of adding an action type to an allowlist
-   or a per-action branch. Examples: the causal recovery used for reorders
-   (`reorder-conflict.util.ts`, `superseded-operation-resolver.service.ts`),
-   the disjoint-field merge (`conflict-disjoint-merge.util.ts`), and derived
-   membership. Whatever the path, prove convergence and content preservation
-   in **both** conflict directions (local edit first and remote edit first)
-   with an E2E. Removing a safety stop is not a fix on its own. If no generic
-   path fits, design the smallest safe change, including what released clients
-   do with the ops you emit
-   ([ADR #8](../../ARCHITECTURE-DECISIONS.md#8-additive-data-model-evolution-over-schema-bumps)).
-   The resolver's `max-lines` cap in `eslint.config.js` only goes down.
+   existing generic mechanism: the disjoint-field merge
+   (`conflict-disjoint-merge.util.ts`), derived membership, or an admission set
+   that `_assertMultiEntityPlansAreSafe` checks, when the action meets the
+   set's documented contract (e.g. `SCOPED_PLAN_MULTI_ACTIONS`). Per-action
+   resolution logic (an `ActionType` branch, predicate or projection written
+   for one action, as in `reorder-conflict.util.ts`) is the last resort. Use
+   it only when no generic path fits, as the smallest safe change, including
+   what released clients do with the ops you emit
+   ([ADR #8](../../ARCHITECTURE-DECISIONS.md#8-additive-data-model-evolution-over-schema-bumps)),
+   and say in the PR why none fits. Whatever the path, prove convergence and
+   content preservation in **both** conflict directions (the change pending
+   locally against the remote edit, and the reverse) with an E2E, and check
+   both timestamp winners. Admitting an action or removing a safety stop
+   without that proof is not a fix (#10264). The `max-lines` cap on
+   `conflict-resolution.service.ts` in `eslint.config.js` only goes down, but
+   its `*.util.ts` helpers are uncapped.
 2. **Don't add denormalized lists or undeclared cross-entity writes.** Store
    the fact on the child (`task.dueDay`, `task.parentId`, `note.projectId`) and
    derive the list, as `TODAY_TAG` does
    ([ADR #2](../../ARCHITECTURE-DECISIONS.md#2-today_tag-virtual-tag-pattern)).
-   A new list on a parent turns every child edit into a potential multi-entity
-   conflict. True multi-entity transitions still follow the atomicity rule
-   above.
+   A new child field must be [optional](./persisted-model-fields.md). A new
+   list on a parent turns every child edit into a potential multi-entity
+   conflict. Existing lists stay, because released clients read and write
+   them: a child field that shadows one goes stale (review §4.2), and a new
+   action that must update one should reuse the action that already maintains
+   it. True multi-entity transitions that no child fact can express, such as a
+   delete cascade, still follow the atomicity rule above.
 3. **No new crossing may reach the fail-closed stop.** A PR that adds a
-   multi-entity action, or changes what one writes, names the path that
-   resolves its conflicts with concurrent edits of every entity it declares,
-   and covers it with an E2E. The crossings known to stop today are pinned by
-   `src/app/op-log/testing/integration/reorder-conflict-wedge.integration.spec.ts`
-   and listed in
-   [the remaining-actions audit](../plans/2026-09-26-sync-remaining-conflict-actions-audit.md).
+   multi-entity action, or changes what one declares or writes, names the path
+   that resolves its conflicts with concurrent edits of every entity it
+   declares, and covers it with an E2E. If a new action has no such path,
+   change its shape (one declared entity, the fact on the child) instead of
+   compensating for it. Check new edits too: editing a reordered note outside
+   the commuting predicate in `reorder-conflict.util.ts` stops sync against a
+   pending `updateNoteOrder`. Specs that pin today's stops:
+   `src/app/op-log/testing/integration/unsupported-multi-entity-conflict.integration.spec.ts`
+   and, for reorders,
+   `src/app/op-log/testing/integration/reorder-conflict-wedge.integration.spec.ts`.
+   [The remaining-actions audit](../plans/2026-09-26-sync-remaining-conflict-actions-audit.md)
+   inventories the known stops as of 2026-09-26; #10294 and #10295 have since
+   resolved two of the crossings it lists.
 
 ---
 
