@@ -91,6 +91,7 @@ import { IndexedDbOpLogAdapter } from '../../../persistence/indexed-db-op-log-ad
 import { OpLogDbAdapter } from '../../../persistence/op-log-db-adapter';
 import { OP_LOG_DB_ADAPTER_FACTORY } from '../../../persistence/op-log-db-adapter.token';
 import { OperationLogCompactionService } from '../../../persistence/operation-log-compaction.service';
+import { OperationLogHydratorService } from '../../../persistence/operation-log-hydrator.service';
 import { OperationLogStoreService } from '../../../persistence/operation-log-store.service';
 import { TabSeqFrontierService } from '../../../persistence/tab-seq-frontier.service';
 import { ImmediateUploadService } from '../../../sync/immediate-upload.service';
@@ -381,11 +382,16 @@ export class SyncFuzzHarness {
     setOperationCaptureService(TestBed.inject(OperationCaptureService));
     // Effects subscribe when the store is created.
     TestBed.inject(OperationLogEffects);
-    // Local archive writes (ArchiveOperationHandlerEffects) and triggered
-    // compaction run detached from the dispatch; a step must not end, and the
-    // device swap out, before they wrote to this device's database.
+    // Local archive writes (ArchiveOperationHandlerEffects) and triggered or
+    // post-hydration compaction run detached from their caller; a step must
+    // not end, and the device swap out, before they wrote to this device's
+    // database.
     this._trackInFlight(TestBed.inject(ArchiveOperationHandler), 'handleOperation');
     this._trackInFlight(TestBed.inject(OperationLogCompactionService), 'compact');
+    this._trackInFlight(
+      TestBed.inject(OperationLogCompactionService),
+      'compactIfBloated',
+    );
     this._pristineState = await firstValueFrom(TestBed.inject(Store));
     this._pristineFields = new Map();
     for (const [token, names] of DEVICE_FIELDS) {
@@ -449,6 +455,24 @@ export class SyncFuzzHarness {
       device.fields = this._saveFields();
       this._current = undefined;
     }
+  }
+
+  /**
+   * Restarts the device like an app reload: an empty store and pristine
+   * in-memory service state, then the real startup hydration from the
+   * device's database (OperationLogHydratorService.hydrateStore).
+   */
+  async restart(device: FuzzDevice): Promise<void> {
+    device.state = this._pristineState;
+    device.fields = undefined;
+    await this.as(device, () =>
+      TestBed.inject(OperationLogHydratorService).hydrateStore(),
+    );
+  }
+
+  /** Compacts the device's op log: a state-cache snapshot, then pruning. */
+  async compact(device: FuzzDevice): Promise<void> {
+    await this.as(device, () => TestBed.inject(OperationLogCompactionService).compact());
   }
 
   /** Dispatches a local user action on the current device and waits for capture. */

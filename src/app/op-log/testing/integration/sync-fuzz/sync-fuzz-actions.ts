@@ -59,11 +59,17 @@ export type Intent =
   | ['countHabit', string]
   | ['reorderHabits', number, number];
 
-/** One step: a device, an optional action, and whether it syncs afterwards. */
+/**
+ * One step: a device, an optional action, then optional events in this
+ * order: sync (`s`), op-log compaction (`c`), restart from the device's
+ * database (`r`).
+ */
 export interface FuzzStep {
   d: string;
   a?: Intent;
   s?: 1;
+  c?: 1;
+  r?: 1;
 }
 
 /** A value the step wrote, for the preservation oracles. */

@@ -58,6 +58,8 @@ export interface FuzzOptions {
 
 const DEVICES = ['A', 'B', 'C'];
 const SYNC_PROBABILITY = 0.35;
+const COMPACT_PROBABILITY = 0.1;
+const RESTART_PROBABILITY = 0.1;
 const SETTLE_ROUNDS = 6;
 const FAILING_EVENTS: readonly FuzzEventKind[] = [
   'stop',
@@ -152,13 +154,24 @@ export const diffPaths = (
 };
 
 /**
- * The synced state minus what legitimately differs per device. Reducers stamp
- * `modified` with the applying device's clock on every update (task CRUD,
- * lwwUpdateMetaReducer), so it is metadata, not content, and never converges.
+ * The synced state minus what legitimately differs per device:
+ * - `modified`: reducers stamp it with the applying device's clock on every
+ *   update (task CRUD, lwwUpdateMetaReducer), so it never converges;
+ * - `isDataLoaded`: a runtime flag hydration sets on the task slice;
+ * - empty objects, which equal a missing key (an archive flush run locally
+ *   leaves `{}` where the remote flush leaves nothing).
  */
 export const comparable = (state: unknown): unknown =>
-  JSON.parse(JSON.stringify(state), (key, value) =>
-    key === 'modified' ? undefined : value,
+  JSON.parse(JSON.stringify(state), (key, value: unknown) =>
+    key === 'modified' ||
+    key === 'isDataLoaded' ||
+    (key !== '' &&
+      value !== null &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      Object.keys(value).length === 0)
+      ? undefined
+      : value,
   );
 
 const shortJson = (value: unknown): string => JSON.stringify(value)?.slice(0, 160) ?? '';
@@ -168,8 +181,11 @@ const pathSignature = (path: string): string =>
   path
     .split('.')
     .slice(0, 6)
-    .map((part) =>
-      /^\d+$|^[tnh]\d+$|^fuzzDev|^\d{4}-\d{2}-\d{2}$/.test(part) ? '*' : part,
+    .map((part, i, parts) =>
+      parts[i - 1] === 'entities' ||
+      /^\d+$|^[tnh]\d+$|^fuzzDev|^\d{4}-\d{2}-\d{2}$/.test(part)
+        ? '*'
+        : part,
     )
     .join('.');
 
@@ -179,7 +195,8 @@ export const runFuzz = async (options: FuzzOptions): Promise<FuzzResult> => {
   const failures: FuzzFailure[] = [];
   const fail = (signature: string, detail: string): void => {
     if (!failures.some((f) => f.signature === signature)) {
-      failures.push({ signature, detail });
+      // Wall-clock values depend on when the run started; keep them out.
+      failures.push({ signature, detail: detail.replace(/\b1[5-9]\d{11}\b/g, '<time>') });
     }
   };
   const ledger = new Ledger();
@@ -210,11 +227,15 @@ export const runFuzz = async (options: FuzzOptions): Promise<FuzzResult> => {
       });
     }
     if (step.s) await harness.sync(device);
-    if (applied || step.s) {
+    if (step.c) await harness.compact(device);
+    if (step.r) await harness.restart(device);
+    if (applied || step.s || step.c || step.r) {
       executed.push({
         d: step.d,
         ...(applied ? { a: applied } : {}),
         ...(step.s ? { s: 1 } : {}),
+        ...(step.c ? { c: 1 } : {}),
+        ...(step.r ? { r: 1 } : {}),
       });
     }
   };
@@ -239,7 +260,12 @@ export const runFuzz = async (options: FuzzOptions): Promise<FuzzResult> => {
         );
       });
       await runStep(
-        { d: name, ...(random() < SYNC_PROBABILITY ? { s: 1 } : {}) },
+        {
+          d: name,
+          ...(random() < SYNC_PROBABILITY ? { s: 1 } : {}),
+          ...(random() < COMPACT_PROBABILITY ? { c: 1 } : {}),
+          ...(random() < RESTART_PROBABILITY ? { r: 1 } : {}),
+        },
         intent,
       );
     }
@@ -259,6 +285,7 @@ export const runFuzz = async (options: FuzzOptions): Promise<FuzzResult> => {
   const observer = await harness.addDevice('F');
   await harness.sync(observer);
 
+  const eventsBeforeRestart = harness.events.length;
   // Oracle: no stops or other sync failures (known stops excepted).
   for (const event of harness.events) {
     if (!FAILING_EVENTS.includes(event.kind)) continue;
@@ -298,6 +325,27 @@ export const runFuzz = async (options: FuzzOptions): Promise<FuzzResult> => {
   }
 
   checkPreservation(reference, ledger, fail);
+
+  // Oracle: a restart (hydration from the device's own database) keeps state.
+  for (const name of DEVICES) {
+    const before = comparable(await harness.syncedState(deviceOf(name)));
+    await harness.restart(deviceOf(name));
+    const after = await harness.syncedState(deviceOf(name));
+    for (const diff of diffPaths(comparable(after), before)) {
+      const path = diff.slice(1).split('.');
+      fail(
+        `restart-changed:${pathSignature(diff)}`,
+        `${name} after vs before restart at ${diff}: ${shortJson(
+          valueAt(after, path),
+        )} vs ${shortJson(valueAt(before, path))}`,
+      );
+    }
+  }
+  for (const event of harness.events.slice(eventsBeforeRestart)) {
+    if (FAILING_EVENTS.includes(event.kind)) {
+      fail(`restart-${event.kind}:${event.detail.slice(0, 80)}`, `${event.device}`);
+    }
+  }
   return {
     steps: executed,
     failures,

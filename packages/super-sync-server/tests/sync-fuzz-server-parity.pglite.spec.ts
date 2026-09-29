@@ -210,9 +210,22 @@ describe('sync fuzz SuperSync port: parity with the real server rules', () => {
 
   it('pure helpers agree on random operations', () => {
     const random = createRandom(99);
-    for (let i = 0; i < 400; i++) {
+    // A retry of `op` with at most one field changed, or an unrelated op, so
+    // every identity field of the duplicate checks is exercised on its own.
+    const variantOf = (op: Operation, id: string): Operation => {
+      const other = randomOp(random, id);
+      const roll = random();
+      if (roll < 0.3) return { ...op };
+      if (roll < 0.4) return { ...op, vectorClock: other.vectorClock };
+      if (roll < 0.5) return { ...op, payload: other.payload };
+      if (roll < 0.6) return { ...op, entityIds: other.entityIds };
+      if (roll < 0.7) return { ...op, timestamp: op.timestamp + 1 };
+      if (roll < 0.8) return { ...op, schemaVersion: other.schemaVersion };
+      return other;
+    };
+    for (let i = 0; i < 600; i++) {
       const op = randomOp(random, `p-${i}`);
-      const other = random() < 0.5 ? { ...op } : randomOp(random, `p-${i}`);
+      const other = variantOf(op, `p-${i}`);
       const existing = randomOp(random, `x-${i}`);
       expect(port.getConflictEntityIds(op)).toEqual(getConflictEntityIds(op));
       expect(port.getStoredEntityIds(op)).toEqual(getStoredEntityIds(op));

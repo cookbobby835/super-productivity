@@ -13,9 +13,9 @@ export const keepKarmaAlive = (tick: number): void => {
 };
 
 /**
- * Delta debugging (ddmin) over steps, then a pass dropping single actions and
- * sync events. A candidate counts as failing only when `isSameFailure` holds
- * for its run (e.g. the same signature).
+ * Delta debugging (ddmin) over steps, then a pass dropping single actions
+ * and events. A candidate counts as failing only when `isSameFailure`
+ * holds for its run (e.g. the same signature).
  */
 export const shrinkTrace = async (
   steps: FuzzStep[],
@@ -49,13 +49,18 @@ export const shrinkTrace = async (
     }
   }
 
+  // Then try each step without its action or one of its events.
   for (let i = 0; i < current.length && runs < maxRuns; i++) {
-    const { a, s, d } = current[i];
-    for (const simpler of [
-      a && s ? { d, a } : undefined,
-      a && s ? { d, s } : undefined,
-    ]) {
-      if (!simpler) continue;
+    const { d, a, s, c, r } = current[i];
+    const variants: [unknown, FuzzStep][] = [
+      [a, { d, s, c, r }],
+      [s, { d, a, c, r }],
+      [c, { d, a, s, r }],
+      [r, { d, a, s, c }],
+    ];
+    for (const [dropped, simpler] of variants) {
+      const { a: action, s: sync, c: compact, r: restart } = simpler;
+      if (dropped === undefined || !(action || sync || compact || restart)) continue;
       const candidate = [...current.slice(0, i), simpler, ...current.slice(i + 1)];
       if (await fails(candidate)) {
         current = candidate;
