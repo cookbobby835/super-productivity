@@ -37,6 +37,7 @@ import {
   EMPTY_FOLDER_SYNC_FORMAT,
 } from './file-based-sync-format';
 import { assertSyncFileVersion } from './assert-sync-file-version';
+import { buildSplitMigrationState } from './file-based-split-state';
 import { OpLog } from '../../../core/log';
 import {
   DecompressError,
@@ -1986,23 +1987,6 @@ export class FileBasedSyncAdapterService {
     return { data: opsData, rev: result.rev };
   }
 
-  private _buildSplitMigrationState(
-    legacy: FileBasedSyncData,
-    clientId: string,
-  ): FileBasedStateFile {
-    return {
-      version: FILE_BASED_SYNC_CONSTANTS.SPLIT_FILE_VERSION,
-      syncVersion: legacy.syncVersion,
-      schemaVersion: legacy.schemaVersion ?? 1,
-      vectorClock: legacy.vectorClock,
-      lastModified: Date.now(),
-      clientId,
-      state: legacy.state,
-      archiveYoung: legacy.archiveYoung,
-      archiveOld: legacy.archiveOld,
-    };
-  }
-
   private async _finalizeSplitMigrationMarker(
     provider: GuardedFileSyncProvider,
     cfg: EncryptAndCompressCfg,
@@ -2103,7 +2087,7 @@ export class FileBasedSyncAdapterService {
         provider,
         cfg,
         encryptKey,
-        this._buildSplitMigrationState(legacy.data, current.data.clientId),
+        buildSplitMigrationState(legacy.data, current.data.clientId),
       );
       current = {
         data: {
