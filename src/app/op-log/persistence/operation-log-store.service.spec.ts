@@ -1847,12 +1847,26 @@ describe('OperationLogStoreService', () => {
     });
 
     it('should rebase nothing when an op is no longer pending', async () => {
-      const op = createTestOperation({ id: 'rebase-synced' });
-      await service.append(op, 'local');
-      await service.markSynced([(await service.getOpsAfterSeq(0))[0].seq]);
+      const pending = createTestOperation({
+        id: 'rebase-pending',
+        vectorClock: { testClient: 1 },
+      });
+      const op = createTestOperation({
+        id: 'rebase-synced',
+        vectorClock: { testClient: 2 },
+      });
+      await service.appendWithVectorClockOverwrite(pending, 'local');
+      await service.appendWithVectorClockOverwrite(op, 'local');
+      await service.markSynced([(await service.getOpsAfterSeq(0))[1].seq]);
 
-      expect(await service.rebasePendingLocalOps([op.id], { remote: 1 })).toEqual([]);
-      expect((await service.getOpsAfterSeq(0))[0].op.vectorClock).toEqual(op.vectorClock);
+      // All or nothing: the op that is still pending keeps its clock as well.
+      expect(
+        await service.rebasePendingLocalOps([pending.id, op.id], { remote: 1 }),
+      ).toEqual([]);
+      expect(
+        (await service.getOpsAfterSeq(0)).map((entry) => entry.op.vectorClock),
+      ).toEqual([pending.vectorClock, op.vectorClock]);
+      expect(await service.getVectorClock()).toEqual({ testClient: 2 });
     });
 
     it('should keep the counter of a rebased op the state cache covers', async () => {

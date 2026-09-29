@@ -643,6 +643,20 @@ describe('round-time conflict convergence integration (#8944)', () => {
           VectorClockComparison.GREATER_THAN,
         );
       }
+      // A second tab rejected for the same ops finds them rebased: none moves again.
+      const again = await TestBed.inject(
+        SupersededOperationResolverService,
+      ).rebaseCommutingTimeDeltaRejections(
+        pendingAfter.map(({ op }) => ({
+          opId: op.id,
+          op,
+          existingClock: remoteOp.vectorClock,
+        })),
+      );
+      expect([...again]).toEqual([...rebased]);
+      expect((await opLogStore.getUnsynced()).map(({ op }) => op.vectorClock)).toEqual(
+        pendingAfter.map(({ op }) => op.vectorClock),
+      );
 
       // The server now accepts the unchanged payloads; B applies them.
       expect(
