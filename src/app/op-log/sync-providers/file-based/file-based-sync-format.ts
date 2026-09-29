@@ -41,12 +41,16 @@ export const EMPTY_FOLDER_SYNC_FORMAT: 'v2' | 'v3' = 'v2';
  * Discover only existing v2/v3 protocol files. A local installation says nothing
  * about remote data. A v16 `__meta_` folder counts as empty here: the readers
  * still report it on normal syncs, and a confirmed force overwrite replaces it.
+ * A backup without its primary counts: an interrupted write (Android writes
+ * delete, create, then write) can leave only the `.bak` of an existing folder.
  */
 export const discoverFileSyncFormat = async (
   provider: Provider,
 ): Promise<'v2' | 'v3' | 'empty'> => {
   if (await fileExists(provider, FILE_BASED_SYNC_CONSTANTS.OPS_FILE)) return 'v3';
   if (await fileExists(provider, FILE_BASED_SYNC_CONSTANTS.SYNC_FILE)) return 'v2';
+  if (await fileExists(provider, FILE_BASED_SYNC_CONSTANTS.OPS_BACKUP_FILE)) return 'v3';
+  if (await fileExists(provider, FILE_BASED_SYNC_CONSTANTS.BACKUP_FILE)) return 'v2';
   return 'empty';
 };
 
