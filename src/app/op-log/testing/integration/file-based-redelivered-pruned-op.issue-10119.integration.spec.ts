@@ -576,5 +576,55 @@ for (const isUseSplitSyncFiles of [false, true]) {
       await regressAndroidCounterViaUseLocalUseRemote();
       await expectLinuxStillGetsRegressedOpAfterUpload(3);
     });
+
+    // A fresh device found an empty folder. Another device then seeds it with a
+    // full-state snapshot (SYNC_IMPORT) before the fresh device uploads. The
+    // snapshot carries no retained ops, so the #10256 guard does not fire, and
+    // the fresh device has no recorded clock for the #9170 base check. Its
+    // upload must still wait for a download: merging would replace (v2) or
+    // silently skip (v3) the other device's state.
+    for (const readBeforeUpload of ['none', 'unapplied probe'] as const) {
+      it(`retries an upload onto a snapshot seeded after an empty download (${readBeforeUpload})`, async () => {
+        const empty = await linux.downloadOps(0, ownClientId);
+        expect(empty.latestSeq).toBe(0);
+        await linux.setLastServerSeq(empty.latestSeq);
+
+        const seeder = 'seeding-client';
+        await newAdapter().uploadSnapshot(
+          createValidAppData(),
+          seeder,
+          'initial',
+          { [seeder]: 1 },
+          CURRENT_SCHEMA_VERSION,
+          false,
+          'seed-import',
+          false,
+          'SYNC_IMPORT',
+          'SERVER_MIGRATION',
+        );
+        if (readBeforeUpload === 'unapplied probe') {
+          // The server-migration check reads the folder without applying it.
+          expect((await linux.downloadOps(0, undefined, 1)).latestSeq).toBe(1);
+        }
+
+        const path = isUseSplitSyncFiles ? 'sync-ops.json' : 'sync-data.json';
+        const before = remote.getFileContent(path);
+        await expectAsync(
+          linuxUploads(
+            taskOp(
+              'linux-first',
+              ownClientId,
+              ActionType.TASK_SHARED_ADD,
+              OpType.Create,
+              'linux-task',
+              { actionPayload: {}, entityChanges: [] },
+              { [ownClientId]: 1 },
+            ),
+          ),
+        ).toBeRejectedWithError(UploadRevToMatchMismatchAPIError);
+        expect(remote.getFileContent(path)).toEqual(before);
+        expect(await linux.getLastServerSeq()).toBe(0);
+      });
+    }
   });
 }
