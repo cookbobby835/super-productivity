@@ -448,6 +448,50 @@ for (const isUseSplitSyncFiles of [false, true]) {
       expect(appliedOpIdsPassedToApplier()).toContain('android-after');
     });
 
+    // The cold-read check compares against the last-seen revision. Recovering a
+    // torn primary from its backup deletes that revision, so the check must not
+    // turn into "anything goes" until the next applied download.
+    it('retries an upload against unseen remote data after backup recovery', async () => {
+      await seedRemoteFromLinux();
+      await androidUploads(otherAddTask('android-before', 'before-task', { [OTHER]: 1 }));
+      await syncService.downloadRemoteOps(linux);
+      expect(appliedOpIdsPassedToApplier()).toContain('android-before');
+
+      // An interrupted write tears the primary; Linux recovers from its backup.
+      const path = isUseSplitSyncFiles ? 'sync-ops.json' : 'sync-data.json';
+      remote.setFileContent(path, 'pf_2__{"torn');
+      await syncService.downloadRemoteOps(linux);
+
+      // Android heals the primary and appends an op Linux has not applied.
+      await androidUploads(
+        otherAddTask('android-unseen', 'unseen-task', { [OTHER]: 2, [ownClientId]: 1 }),
+      );
+      // Linux uploads after its in-cycle cache expired: a cold read.
+      const realNow = Date.now();
+      spyOn(Date, 'now').and.returnValue(realNow + 60_000);
+      const before = remote.getFileContent(path);
+      const cursor = await linux.getLastServerSeq();
+      await expectAsync(
+        linuxUploads(
+          taskOp(
+            'linux-edit',
+            ownClientId,
+            ActionType.TASK_SHARED_UPDATE,
+            OpType.Update,
+            'linux-seed-task',
+            { actionPayload: {}, entityChanges: [] },
+            { [OTHER]: 1, [ownClientId]: 2 },
+          ),
+        ),
+      ).toBeRejectedWithError(UploadRevToMatchMismatchAPIError);
+      expect(await linux.getLastServerSeq()).toBe(cursor);
+      expect(remote.getFileContent(path)).toEqual(before);
+
+      applierSpy.applyOperations.calls.reset();
+      await syncService.downloadRemoteOps(linux);
+      expect(appliedOpIdsPassedToApplier()).toContain('android-unseen');
+    });
+
     // #10239 (operation-log-architecture.md B.2): an author whose own
     // counter regressed (USE_REMOTE onto a stale USE_LOCAL snapshot) re-uses a
     // counter this device already covers. If an own upload also merged that op
