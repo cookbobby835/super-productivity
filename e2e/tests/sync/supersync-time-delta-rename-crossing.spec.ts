@@ -283,4 +283,61 @@ test.describe('@supersync time delta crossing a concurrent task edit', () => {
       }
     }
   });
+
+  // Against B's crossing delta the server rejects A's first rename but accepts
+  // A's own delta and A's second rename, which dominates it. Moving the first
+  // rename past the second would leave every other device on the first title.
+  test('a rejected rename does not overtake a later rename the server accepted', async ({
+    browser,
+    baseURL,
+    testRunId,
+  }) => {
+    test.setTimeout(300000);
+
+    const taskDate = '2026-07-13';
+    const taskName = `DeltaCrossingOrder-${Date.now()}`;
+    const clients: SimulatedE2EClient[] = [];
+
+    try {
+      const syncConfig = getSuperSyncConfig(await createTestUser(testRunId));
+      const clientA = await createSimulatedClient(browser, baseURL!, 'A', testRunId);
+      clients.push(clientA);
+      await clientA.sync.setupSuperSync(syncConfig);
+      await clientA.workView.addTask(taskName);
+      await waitForTask(clientA.page, taskName);
+      await recordTaskTimeDelta(clientA, taskName, taskDate, 10000);
+      await clientA.sync.syncAndWait();
+
+      const clientB = await createSimulatedClient(browser, baseURL!, 'B', testRunId);
+      clients.push(clientB);
+      await clientB.sync.setupSuperSync(syncConfig);
+      await clientB.sync.syncAndWait();
+      await waitForTask(clientB.page, taskName);
+      await expectExactTaskTime(clientB, taskName, 10000);
+      for (const client of clients) {
+        await blockBackgroundSync(client);
+      }
+      const rejections = recordRejections(clients);
+
+      await renameTask(clientA, taskName, `${taskName}-First`);
+      await recordTaskTimeDelta(clientA, taskName, taskDate, 2000);
+      await renameTask(clientA, `${taskName}-First`, `${taskName}-Second`);
+      await recordTaskTimeDelta(clientB, taskName, taskDate, 3000);
+      await sync(clientB);
+      await sync(clientA);
+      expect(rejections).toContain('A:CONFLICT_CONCURRENT');
+      await sync(clientB);
+
+      for (const client of clients) {
+        await expectExactTaskTime(client, taskName, 15000);
+        await expect
+          .poll(() => getTaskTitleFromState(client, taskName), { timeout: 30000 })
+          .toBe(`${taskName}-Second`);
+      }
+    } finally {
+      for (const client of clients) {
+        await closeClient(client);
+      }
+    }
+  });
 });

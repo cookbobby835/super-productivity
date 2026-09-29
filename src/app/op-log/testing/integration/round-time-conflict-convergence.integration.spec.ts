@@ -673,6 +673,121 @@ describe('round-time conflict convergence integration (#8944)', () => {
     });
   }
 
+  // The server accepts A's delta next to B's (two deltas commute) and then
+  // every later op of A, which dominates it, while it rejects A's earlier
+  // rename. Receivers apply the rebased rename after those accepted ops, so it
+  // may only move past them when it commutes with them; a second rename must
+  // take the snapshot path, or B keeps the first title while A shows the second.
+  for (const later of ['delta', 'delta+rename'] as const) {
+    it(`moves a rejected rename past accepted later ${later} ops only when they commute (#10214)`, async () => {
+      const capture = TestBed.inject(OperationCaptureService);
+      const resolver = TestBed.inject(ConflictResolutionService);
+      const superseded = TestBed.inject(SupersededOperationResolverService);
+      const server = new MockSyncServer();
+      const clientA = new TestClient(CLIENT_A);
+      const clientB = new TestClient(CLIENT_B);
+      const commutes = later === 'delta';
+
+      // Device A, offline: renames X, tracks 2m on it (the timer already wrote
+      // them to its store) and, for 'delta+rename', renames it again.
+      localState = updateTaskEntity(localState, TASK_X, {
+        timeSpent: 12 * MINUTE,
+        timeSpentOnDay: { [DAY]: 12 * MINUTE },
+      });
+      const localActions = [
+        TaskSharedActions.updateTask({ task: { id: TASK_X, changes: { title: 'A1' } } }),
+        syncTimeSpent({ taskId: TASK_X, date: DAY, duration: 2 * MINUTE }),
+        ...(commutes
+          ? []
+          : [
+              TaskSharedActions.updateTask({
+                task: { id: TASK_X, changes: { title: 'A3' } },
+              }),
+            ]),
+      ] as PersistentAction[];
+      for (const [i, action] of localActions.entries()) {
+        localState = reducer(localState, action);
+        await opLogStore.appendWithVectorClockOverwrite(
+          captureOperation(action, clientA, capture, 1_000 + i),
+          'local',
+        );
+      }
+
+      // Device B tracks 3m on X and syncs first; the crossing commutes on A.
+      const remoteDelta = captureOperation(
+        syncTimeSpent({
+          taskId: TASK_X,
+          date: DAY,
+          duration: 3 * MINUTE,
+        }) as PersistentAction,
+        clientB,
+        capture,
+        2_000,
+      );
+      let remoteState = reducer(initialState, convertOpToAction(remoteDelta));
+      expect(uploadLikeServer(server, [remoteDelta], CLIENT_B)).toEqual([]);
+      const detection = await resolver.checkOpForConflicts(remoteDelta, {
+        localPendingOpsByEntity: await opLogStore.getUnsyncedByEntity(),
+        appliedFrontierByEntity: new Map(),
+        retainedOpsByEntity: new Map(),
+        snapshotVectorClock: undefined,
+        snapshotEntityKeys: undefined,
+        hasNoSnapshotClock: true,
+      });
+      expect(detection.conflicts).toEqual([]);
+      await opLogStore.append(remoteDelta, 'remote');
+      await opLogStore.mergeRemoteOpClocks([remoteDelta]);
+      localState = reducer(localState, convertOpToAction(remoteDelta));
+
+      const uploadPending = async (): Promise<Operation[]> => {
+        const pending = await opLogStore.getUnsynced();
+        const rejectedOps = uploadLikeServer(
+          server,
+          pending.map(({ op }) => op),
+          CLIENT_A,
+        );
+        await opLogStore.markSynced(
+          pending.filter(({ op }) => !rejectedOps.includes(op)).map(({ seq }) => seq),
+        );
+        return rejectedOps;
+      };
+      const rejected = await uploadPending();
+      expect(rejected.map(({ id }) => id)).toEqual([
+        (await opLogStore.getOpsAfterSeq(0))[0].op.id,
+      ]);
+
+      const rejectedItems = rejected.map((op) => ({
+        opId: op.id,
+        op,
+        existingClock: remoteDelta.vectorClock,
+      }));
+      const rebased = await superseded.rebaseCommutingTimeDeltaRejections(rejectedItems);
+      expect(rebased.size).toBe(commutes ? 1 : 0);
+      // What the rejection handler runs next for the ops nothing rebased.
+      const notRebased = rejectedItems.filter(({ opId }) => !rebased.has(opId));
+      if (notRebased.length > 0) {
+        await superseded.resolveSupersededLocalOps(notRebased, [remoteDelta.vectorClock]);
+      }
+      expect(await uploadPending()).toEqual([]);
+      for (const { op } of server.downloadOps(1, CLIENT_B).ops) {
+        remoteState = reducer(remoteState, convertOpToAction(op as Operation));
+      }
+
+      expect(getTask(localState, TASK_X).title).toBe(commutes ? 'A1' : 'A3');
+      expect(getTask(localState, TASK_X).timeSpent).toBe(15 * MINUTE);
+      expect(taskSyncProjection(remoteState, TASK_X)).toEqual(
+        taskSyncProjection(localState, TASK_X),
+      );
+      let restartedState = initialState;
+      for (const entry of await opLogStore.getOpsAfterSeq(0)) {
+        restartedState = reducer(restartedState, convertOpToAction(entry.op));
+      }
+      expect(taskSyncProjection(restartedState, TASK_X)).toEqual(
+        taskSyncProjection(localState, TASK_X),
+      );
+    });
+  }
+
   it('resolves a REMOTE bulk rounding op against a newer local edit and converges (#9601)', async () => {
     const capture = TestBed.inject(OperationCaptureService);
     const resolver = TestBed.inject(ConflictResolutionService);
