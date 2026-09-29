@@ -165,6 +165,70 @@ describe('sync fuzz SuperSync port: parity with the real server rules', () => {
     `);
   });
 
+  /** Persists `op` as the server stores an accepted op, in PGlite and the port. */
+  const store = async (
+    server: port.FakeSuperSyncServer,
+    op: Operation,
+    serverSeq: number,
+  ): Promise<void> => {
+    const stored = {
+      ...op,
+      vectorClock: limitVectorClockSize(op.vectorClock, [op.clientId]),
+      entityIds: getStoredEntityIds(op),
+    };
+    await db.query(
+      `INSERT INTO operations (id, user_id, client_id, server_seq, action_type,
+         entity_type, entity_id, entity_ids, vector_clock, schema_version)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [
+        op.id,
+        USER_ID,
+        op.clientId,
+        serverSeq,
+        op.actionType,
+        op.entityType,
+        op.entityId ?? null,
+        stored.entityIds,
+        JSON.stringify(stored.vectorClock),
+        op.schemaVersion,
+      ],
+    );
+    server.rows.push({
+      serverSeq,
+      receivedAt: 5_000,
+      clientTimestamp: op.timestamp,
+      op: stored,
+    });
+  };
+
+  it('agrees on the pre-v2 GLOBAL_CONFIG misc alias for tasks settings', async () => {
+    const server = new port.FakeSuperSyncServer(() => 5_000);
+    const config = (
+      id: string,
+      entityId: string,
+      clock: VectorClock,
+      v: number,
+    ): Operation => ({
+      id,
+      clientId: Object.keys(clock)[0],
+      actionType: '[Global Config] Update Global Config Section',
+      opType: 'UPD',
+      entityType: 'GLOBAL_CONFIG',
+      entityId,
+      payload: {},
+      vectorClock: clock,
+      timestamp: 1_000,
+      schemaVersion: v,
+    });
+    await store(server, config('tasks-v2', 'tasks', { cA: 1 }, 2), 1);
+    await store(server, config('misc-v1', 'misc', { cB: 1 }, 1), 2);
+    // Concurrent only with the newer legacy misc row, which the alias consults.
+    const incoming = config('tasks-next', 'tasks', { cA: 2 }, 2);
+    const real = await detectConflict(USER_ID, incoming, tx);
+    expect(real.hasConflict).toBe(true);
+    expect(server.detectConflict(incoming)).toEqual(real);
+  });
+
   for (let seed = 1; seed <= 12; seed++) {
     it(`detectConflict agrees on random histories (seed ${seed})`, async () => {
       const random = createRandom(seed);
@@ -176,34 +240,7 @@ describe('sync fuzz SuperSync port: parity with the real server rules', () => {
         expect(ported, `op ${i}: ${JSON.stringify(op)}`).toEqual(real);
 
         // Store it either way, as the server would store an accepted op.
-        const stored = {
-          ...op,
-          vectorClock: limitVectorClockSize(op.vectorClock, [op.clientId]),
-          entityIds: getStoredEntityIds(op),
-        };
-        await db.query(
-          `INSERT INTO operations (id, user_id, client_id, server_seq, action_type,
-             entity_type, entity_id, entity_ids, vector_clock, schema_version)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-          [
-            op.id,
-            USER_ID,
-            op.clientId,
-            i + 1,
-            op.actionType,
-            op.entityType,
-            op.entityId ?? null,
-            stored.entityIds,
-            JSON.stringify(stored.vectorClock),
-            op.schemaVersion,
-          ],
-        );
-        server.rows.push({
-          serverSeq: i + 1,
-          receivedAt: 5_000,
-          clientTimestamp: op.timestamp,
-          op: stored,
-        });
+        await store(server, op, i + 1);
       }
     });
   }
