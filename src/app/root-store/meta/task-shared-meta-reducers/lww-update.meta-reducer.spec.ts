@@ -1211,6 +1211,23 @@ describe('lwwUpdateMetaReducer', () => {
         expect(counter.title).toBe('Merged title');
       });
 
+      // A plain setOne would drop the type a snapshot does not carry, and
+      // typia repair would then reset the habit.
+      it('keeps the receiver type when a replace snapshot carries none', () => {
+        const untypedSnapshot: Record<string, unknown> = {
+          ...receiverCounter,
+          title: 'Merged title',
+        };
+        delete untypedSnapshot['type'];
+        const counterState = applyToReceiver(
+          counterOp({ actionPayload: untypedSnapshot, lwwUpdateMode: 'replace' }),
+        );
+        const counter = counterState?.entities['cnt_h'] as SimpleCounter;
+        expect(counter.type).toBe(SimpleCounterType.StopWatch);
+        expect(counter.title).toBe('Merged title');
+        expect(appDataValidators.simpleCounter(counterState as never).success).toBe(true);
+      });
+
       it('recreates a locally deleted counter with the winner type', () => {
         const counterState = applyToReceiver(
           counterOp({
