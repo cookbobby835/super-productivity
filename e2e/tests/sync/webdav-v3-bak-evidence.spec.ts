@@ -49,6 +49,26 @@ test.describe('@webdav an interrupted v2 write keeps the folder on v2', () => {
       await syncA.setupWebdavSync({ ...config, isUseSplitSyncFiles: false });
       await waitForSyncComplete(a.page, syncA);
 
+      // Versions before 18.14 write no format choice. Without this, the joining
+      // device would adopt A's saved "off" from the snapshot and never discover
+      // the format (the setting-locality reproduction covers that).
+      const created = await (
+        await request.get(`${remote}sync-data.json`, {
+          headers: { Authorization: authorization },
+        })
+      ).text();
+      const prefixEnd = created.indexOf('__') + 2;
+      const monolithWithChoice = JSON.parse(created.slice(prefixEnd)) as {
+        state: { globalConfig: { sync: { isUseSplitSyncFiles?: boolean } } };
+      };
+      expect(monolithWithChoice.state.globalConfig.sync.isUseSplitSyncFiles).toBe(false);
+      delete monolithWithChoice.state.globalConfig.sync.isUseSplitSyncFiles;
+      const rewritten = await request.put(`${remote}sync-data.json`, {
+        headers: { Authorization: authorization },
+        data: `${created.slice(0, prefixEnd)}${JSON.stringify(monolithWithChoice)}`,
+      });
+      expect(rewritten.ok()).toBe(true);
+
       // A device with the default setting joins and records a cursor.
       b = await setupSyncClient(browser, baseURL);
       const workB = new WorkViewPage(b.page);
