@@ -23,9 +23,10 @@ internal, Snap edge and `supersync:latest`:
   (#10284), conflict journal (#10287). About 2.0k of the ~2.3k unconditional
   lines are gone; `listFiles` and three store methods remain.
 - **Bug 1 (#10264):** reorders no longer stop sync when they cross a note text
-  edit, habit count, board edit or section title (#10275, #10288, #10295,
-  #10294, #10298). Other crossings still stop sync; see
-  [the remaining-actions audit](2026-09-26-sync-remaining-conflict-actions-audit.md).
+  edit or pin, habit count, board edit, section title or issue-provider edit
+  (#10275, #10288, #10295, #10294, #10298). Other crossings still stop sync; see
+  [the remaining-actions audit](2026-09-26-sync-remaining-conflict-actions-audit.md),
+  which was written at `f84259fcaa`, before #10288, #10294, #10295 and #10298.
 - **Bug 2 (#10256):** fixed for current writers (#10270).
 - **v3:** explicit WebDAV v3 suite mode (#10283). The v3 default for new empty
   folders (#10289) is being rolled back until its follow-ups land.
@@ -37,7 +38,8 @@ internal, Snap edge and `supersync:latest`:
   replacing the ~550 estimate.
 - **Size:** `src/app/op-log/` went from 50,145 to 48,185 production lines and
   `conflict-resolution.service.ts` from 4,817 to 4,581; its lint cap now
-  matches.
+  matches. Same method as Appendix A (non-spec `.ts`, excluding `testing/`),
+  now measured at `878c9a3b4c`.
 
 Still open: Phase 0 rules; released-client E2Es in CI; `syncAndWait()`
 silently resolving the conflict dialog; one structural reorder rule instead

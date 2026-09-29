@@ -341,8 +341,9 @@ bootstrapApplication(AppComponent, {
     },
     // Retire only the obsolete device-local journal. Never await deletion:
     // an older tab can hold its connection open until that tab closes.
-    // Keep this: v18.15.0-v19.1.0 recreate the database on every start, so it
-    // is needed for as long as users can upgrade from those releases.
+    // Keep this: v18.15.0-v19.1.0 open the database on every start, creating it
+    // when missing, so it is needed for as long as users can upgrade from those
+    // releases.
     provideAppInitializer(() => {
       try {
         localStorage.removeItem('SUP_CONFLICT_JOURNAL_CLEARED_BEFORE');

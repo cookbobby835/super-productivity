@@ -189,12 +189,12 @@ export interface OpLogDbAdapter {
   close(): void;
 
   /**
-   * Transitional bridge: operate on a connection/handle owned by the calling
-   * service instead of opening one. Only meaningful for the IndexedDB backend
-   * during the incremental Phase A/B migration, where the store/archive
-   * services still own their own `IDBPDatabase` and lend it here so both share
-   * one connection. Backends that fully self-manage their handle (e.g. SQLite)
-   * leave this undefined; callers guard with `adapter.adoptConnection?.(…)`.
+   * Bridge: operate on a connection/handle owned by the calling service instead
+   * of opening one. Only meaningful for the IndexedDB backend, where the
+   * store/archive services still own their own `IDBPDatabase` and lend it here
+   * so both share one connection. Backends that fully self-manage their handle
+   * (e.g. the parked SQLite one) leave this undefined; callers guard with
+   * `adapter.adoptConnection?.(…)`.
    *
    * @param connection the owner's handle, or `undefined` to release it.
    */

@@ -48,7 +48,7 @@ export interface OpLogDbSchema {
  * NOTE: the IndexedDB adapter must still apply this via versioned upgrade steps
  * for existing users (it cannot simply create the final shape). The declarative
  * form here describes the *target* shape; per-version migration deltas continue
- * to live next to the adapter until Phase A fully replaces `runDbUpgrade`.
+ * to live next to the adapter until `runDbUpgrade` is retired.
  */
 export const OP_LOG_DB_SCHEMA: OpLogDbSchema = {
   name: DB_NAME,
