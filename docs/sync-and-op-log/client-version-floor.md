@@ -39,7 +39,11 @@ Decide these then, with the evidence available at that time:
    request. A request without it counts as old, like the checkpoint gate's
    `isCheckpointSafeAppVersion` does.
 2. **Coverage:** every sync endpoint — uploads, snapshot, reset, restore,
-   downloads and the WebSocket handshake — not only mutations.
+   downloads and the WebSocket handshake — not only mutations. Clients from
+   this release send `appVersion` on the handshake too
+   (`super-sync-websocket.service.ts`). A refused handshake has no JSON body
+   the client can read, so it only reconnects with backoff; the notice comes
+   from the next HTTP request.
 3. **Never:**
    - 401/403: released clients sign out after three.
    - Per-op rejections inside a 200: they permanently drop that device's edits
@@ -50,10 +54,13 @@ Decide these then, with the evidence available at that time:
      rejection of their pending full-state op. A retryable-looking status
      (5xx) avoids that, but proxies may replace 5xx bodies, which would hide the
      code from new clients.
-5. **Rollout:**
+5. **Request volume:** a refused client keeps its ops pending and retries.
+   `ImmediateUploadService` swallows the error, so each debounced local edit
+   still sends one refused upload. Size rate limits for that.
+6. **Rollout:**
    - Off by default for self-hosted servers.
    - Advertise the capability the way `supportsCausalRepairSnapshots` does.
-6. **File providers are out of scope.** They have no server. Stopping released
+7. **File providers are out of scope.** They have no server. Stopping released
    clients there needs a demonstrated per-provider migration (a new format or
    namespace), as the architecture review's Phase 3 describes. A version field
    alone is ignored by released clients.
@@ -67,3 +74,4 @@ Decide these then, with the evidence available at that time:
   `sync-incompatible-version-notice.service.spec.ts`.
 - Wrapper routing: `sync-wrapper.service.spec.ts`.
 - WebSocket stop: `ws-triggered-download.service.spec.ts`.
+- Version on the WebSocket handshake: `super-sync-websocket.service.spec.ts`.
