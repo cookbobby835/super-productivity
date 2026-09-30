@@ -1344,6 +1344,34 @@ describe('bulkHydrationMetaReducer', () => {
         ]);
       });
 
+      it('does not move the restore point for a recreate of a task already back', () => {
+        expect(
+          applied([
+            archiveOp('archive'),
+            restoreOp,
+            taskLwwOp('mid'),
+            taskLwwOp('recreate', true),
+            taskLwwOp('after'),
+          ]),
+        ).toEqual([
+          'archive',
+          ActionType.TASK_SHARED_RESTORE,
+          'mid',
+          'recreate',
+          'after',
+        ]);
+        reducerCalls = [];
+        expect(
+          applied([
+            deleteOp,
+            taskLwwOp('r1', true),
+            taskLwwOp('mid'),
+            taskLwwOp('r2', true),
+            taskLwwOp('after'),
+          ]),
+        ).toEqual([DELETE, 'r1', 'mid', 'r2', 'after']);
+      });
+
       it('does not count a recreate that a same-batch archive blocks', () => {
         expect(
           applied([

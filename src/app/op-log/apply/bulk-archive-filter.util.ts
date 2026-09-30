@@ -480,12 +480,14 @@ export const collectTaskRemovalEntityIdsFromBatch = (
       // the batch, like a restore. Later updates of it are ordinary updates
       // again — a device that received the delete and the recreate in
       // separate syncs applies them. (A 'patch' recreate of an absent task is
-      // ignored by lwwUpdateMetaReducer, so it restores nothing.)
+      // ignored by lwwUpdateMetaReducer, so it restores nothing.) Like a
+      // restore of an active root, a recreate of a task that is already
+      // back does not move the restore point.
       if (
         recreatesAfterDelete &&
         isLwwUpdatePayload(op.payload) &&
         op.payload.lwwUpdateMode !== 'patch' &&
-        archivingOrDeletingEntityIds.has(op.entityId)
+        isRemovedAtIndex(archivingOrDeletingEntityIds, restoredAt, op.entityId, index)
       ) {
         restoredAt.set(op.entityId, index);
       }
@@ -518,11 +520,10 @@ const collectRestoredTaskIds = (op: Operation): Set<string> => {
 /**
  * Whether the op at `index` must treat `entityId` as removed by the batch.
  * A task restored (or recreated, #10381) after its removal stays removed for
- * ops BEFORE the restore
- * (a stale LWW Update there would recreate it, turning the restore into a
- * no-op), but not for ops after it: restart replay is status-blind, so a
- * rejected bulk archive still precedes the restore and the local-win update
- * that re-asserts it (#10220).
+ * ops BEFORE the restore (a stale LWW Update there would recreate it, turning
+ * the restore into a no-op), but not for ops after it: restart replay is
+ * status-blind, so a rejected bulk archive still precedes the restore and the
+ * local-win update that re-asserts it (#10220).
  */
 export const isRemovedAtIndex = (
   ids: Set<string>,
