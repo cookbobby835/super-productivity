@@ -389,8 +389,11 @@ export const runFuzz = async (options: FuzzOptions): Promise<FuzzResult> => {
   // dialog: a generated mix with a replacement intent, or a trace with one or
   // with a dialog answer. Elsewhere the dialog still fails the run, so a
   // full-state op no user intent made keeps the signatures of what it drops.
+  // (A backup export alone replaces nothing.)
   const replaces = options.steps
-    ? options.steps.some((s) => s.k || (s.a && REPLACEMENT_INTENTS.has(s.a[0])))
+    ? options.steps.some(
+        (s) => s.k || s.a?.[0] === 'forceUpload' || s.a?.[0] === 'importBackup',
+      )
     : (options.weights ?? []).some(([kind]) => REPLACEMENT_INTENTS.has(kind));
   const settleAnswer: ImportDialogAnswer | undefined = replaces
     ? 'USE_REMOTE'

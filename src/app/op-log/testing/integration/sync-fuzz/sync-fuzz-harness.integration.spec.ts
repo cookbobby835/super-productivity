@@ -19,7 +19,7 @@ import {
   REPLACEMENT_WEIGHTS,
 } from './sync-fuzz-actions';
 import { FakeSuperSyncServer } from './fake-super-sync-server';
-import { FuzzDevice, SyncFuzzHarness } from './sync-fuzz-harness';
+import { FuzzDevice, FuzzEvent, SyncFuzzHarness } from './sync-fuzz-harness';
 import { comparable, createRandom, runFuzz } from './sync-fuzz-runner';
 
 const addTask = (
@@ -189,20 +189,17 @@ describe('SyncFuzzHarness: negative control', () => {
     ];
     const kept = await runFuzz({ steps, debug: true });
     // The replacement happened: A's force upload is on the server, and B
-    // answered the dialog with the remote data.
+    // answered the dialog with the remote data in its own sync (step 3),
+    // before the rename, not only in settle.
     expect(kept.dump!.some((line) => /^srv .* SYNC_IMPORT FORCE_UPLOAD /.test(line)))
       .withContext(kept.dump!.join('\n'))
       .toBeTrue();
-    expect(
-      kept.dump!.some(
-        (line) =>
-          line.startsWith('evt ') &&
-          line.includes('"device":"B"') &&
-          line.includes('"kind":"import-dialog","detail":"USE_REMOTE"'),
-      ),
-    )
+    const events = kept
+      .dump!.filter((line) => line.startsWith('evt '))
+      .map((line) => JSON.parse(line.slice(4)) as FuzzEvent);
+    expect(events)
       .withContext(kept.dump!.join('\n'))
-      .toBeTrue();
+      .toContain({ step: 3, device: 'B', kind: 'import-dialog', detail: 'USE_REMOTE' });
     expect(kept.failures.map((f) => f.signature))
       .withContext(JSON.stringify(kept.failures))
       .not.toContain('field-reverted:task.title');
