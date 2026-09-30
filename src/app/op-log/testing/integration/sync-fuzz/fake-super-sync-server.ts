@@ -25,8 +25,10 @@ import type {
  * logger. This file must stay free of Angular imports so the server's vitest
  * can load it.
  *
- * Checked against the real server code by
- * packages/super-sync-server/tests/sync-fuzz-server-parity.pglite.spec.ts:
+ * Checked against the real server code by the parity specs in
+ * packages/super-sync-server/tests/: sync-fuzz-server-parity.pglite.spec.ts
+ * for the first three, sync-fuzz-server-full-state-parity.pglite.spec.ts for
+ * the last two:
  * - conflict.ts: detectConflict (the production SQL, on PGlite) and the pure
  *   entity-id, duplicate and in-request retry helpers;
  * - validation.service.ts: ValidationService.validateOp against
@@ -588,7 +590,8 @@ export class FakeSuperSyncServer {
       // The real server resolves an unset fence from the retained import
       // rows (resolveRetainedReplacementSeq). Every import this port keeps
       // was accepted after the fence was last reset, so that is always none
-      // here: 0, the resolved "no retained replacement".
+      // here: 0, the resolved "no retained replacement". Porting pruning or
+      // DELETE /api/sync/data breaks that: restore the lazy lookup then.
       this._latestStateReplacementSeq ??= 0;
       if (
         lastKnownServerSeq !== undefined &&

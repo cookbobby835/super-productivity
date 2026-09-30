@@ -385,13 +385,21 @@ export const runFuzz = async (options: FuzzOptions): Promise<FuzzResult> => {
     }
   };
 
+  // Only a run that can replace state answers the SYNC_IMPORT conflict
+  // dialog: a generated mix with a replacement intent, or a trace with one or
+  // with a dialog answer. Elsewhere the dialog still fails the run, so a
+  // full-state op no user intent made keeps the signatures of what it drops.
+  const replaces = options.steps
+    ? options.steps.some((s) => s.k || (s.a && REPLACEMENT_INTENTS.has(s.a[0])))
+    : (options.weights ?? []).some(([kind]) => REPLACEMENT_INTENTS.has(kind));
+  const settleAnswer: ImportDialogAnswer | undefined = replaces
+    ? 'USE_REMOTE'
+    : undefined;
+
   if (options.steps) {
     for (const step of options.steps) await runStep(step, step.a);
   } else {
     const random = createRandom(options.seed ?? 1);
-    const replaces = (options.weights ?? []).some(([kind]) =>
-      REPLACEMENT_INTENTS.has(kind),
-    );
     let idCounter = 10;
     const nextId = (prefix: string): string => `${prefix}${++idCounter}`;
     for (let i = 0; i < (options.stepCount ?? 30); i++) {
@@ -428,21 +436,21 @@ export const runFuzz = async (options: FuzzOptions): Promise<FuzzResult> => {
     }
   }
 
-  // Settle: every device syncs until a full round moves nothing. A dialog
-  // asking about an incoming replacement is answered with the remote data,
-  // which ends a run of competing replacements.
+  // Settle: every device syncs until a full round moves nothing. In a run
+  // that can replace state, a dialog asking about an incoming replacement is
+  // answered with the remote data, which ends a run of competing replacements.
   harness.tick();
   for (let round = 0; round < SETTLE_ROUNDS; round++) {
     const seqBefore = harness.server.latestSeq;
     let pending = 0;
     for (const name of DEVICES) {
-      await sync(deviceOf(name), 'USE_REMOTE');
+      await sync(deviceOf(name), settleAnswer);
       pending += await harness.pendingOpCount(deviceOf(name));
     }
     if (harness.server.latestSeq === seqBefore && pending === 0) break;
   }
   const observer = await harness.addDevice('F');
-  await sync(observer, 'USE_REMOTE');
+  await sync(observer, settleAnswer);
 
   const eventsBeforeRestart = harness.events.length;
   // Oracle: no stops or other sync failures.
@@ -565,6 +573,7 @@ const dumpRun = async (
   const lines = harness.server.rows.map(
     ({ serverSeq, op }) =>
       `srv ${serverSeq} ${op.clientId} ${op.actionType} ${entityOfOp(op)} ` +
+      `${op.opType}${op.syncImportReason ? ` ${op.syncImportReason}` : ''} ` +
       `${JSON.stringify(op.vectorClock)} ts+${op.timestamp % 1_000_000}`,
   );
   lines.push(...harness.server.rejections.map((r) => `rej ${JSON.stringify(r)}`));

@@ -400,7 +400,9 @@ export const executeIntent = async (
     }
     case 'forceUpload': {
       // SyncWrapperService.forceUpload, once its confirm() is accepted: a
-      // clean-slate SYNC_IMPORT (FORCE_UPLOAD) of this device's state.
+      // clean-slate SYNC_IMPORT (FORCE_UPLOAD) of this device's state. Its
+      // runWithSyncBlocked and sync-cycle guard are left out: the harness
+      // never runs two syncs at once.
       const device = harness.current!;
       try {
         await TestBed.inject(OperationLogSyncService).forceUploadLocalState(

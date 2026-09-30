@@ -187,7 +187,22 @@ describe('SyncFuzzHarness: negative control', () => {
       { d: 'B', s: 1, k: 'R' },
       { d: 'B', a: ['renameTask', 't1', 'after'], s: 1 },
     ];
-    const kept = await runFuzz({ steps });
+    const kept = await runFuzz({ steps, debug: true });
+    // The replacement happened: A's force upload is on the server, and B
+    // answered the dialog with the remote data.
+    expect(kept.dump!.some((line) => /^srv .* SYNC_IMPORT FORCE_UPLOAD /.test(line)))
+      .withContext(kept.dump!.join('\n'))
+      .toBeTrue();
+    expect(
+      kept.dump!.some(
+        (line) =>
+          line.startsWith('evt ') &&
+          line.includes('"device":"B"') &&
+          line.includes('"kind":"import-dialog","detail":"USE_REMOTE"'),
+      ),
+    )
+      .withContext(kept.dump!.join('\n'))
+      .toBeTrue();
     expect(kept.failures.map((f) => f.signature))
       .withContext(JSON.stringify(kept.failures))
       .not.toContain('field-reverted:task.title');
