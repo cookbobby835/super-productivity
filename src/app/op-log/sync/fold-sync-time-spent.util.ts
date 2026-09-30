@@ -123,11 +123,12 @@ const touchesTask = (op: Operation, taskId: string): boolean =>
  * Keep both decisions together. Live apply still uses the written remote rows
  * and only the local snapshots needed for compensation.
  *
- * The same holds for an incoming nonconflicting task update of plain fields,
- * e.g. a notes edit that commutes with a pending time delta (#10385): a
+ * An incoming nonconflicting task update of plain fields, e.g. a notes edit
+ * that commutes with a pending time delta (#10385), is handled differently: a
  * replace snapshot read before it is applied would erase it on every other
- * device. Its fields are overlaid onto the snapshot, which then carries this
- * device's post-batch value of them.
+ * device, so its fields are overlaid onto the snapshot's content. Unlike a
+ * delta it is absolute, so it needs neither the clock merge nor the hoist: it
+ * stays after the snapshot and re-applies the same value there on replay.
  */
 export const buildTimeAwareResolutionBatches = async ({
   unappliedRemoteLosers,
@@ -155,11 +156,7 @@ export const buildTimeAwareResolutionBatches = async ({
       .filter((op) => op.entityType === 'TASK' && !isSyncTimeSpentOp(op))
       .flatMap(getOpEntityIds),
   );
-  const foldFieldOps = (
-    op: Operation,
-    fieldOps: Operation[],
-    timeFoldedIds: ReadonlySet<string>,
-  ): Operation => {
+  const foldFieldOps = (op: Operation, fieldOps: Operation[]): Operation => {
     if (
       op.entityType !== 'TASK' ||
       !op.entityId ||
@@ -169,33 +166,29 @@ export const buildTimeAwareResolutionBatches = async ({
     ) {
       return op;
     }
-    // Every incoming op on this task must end up in the snapshot. Folding
-    // merges the folded ops' clocks, and with them the clocks of earlier ops
-    // from the same device; the snapshot then dominates such an op without
-    // carrying its fields, the server accepts it, and receivers lose the edit
-    // where master's rejected snapshot was rebuilt (review of #10398). An op
-    // touches the task when it declares it or names it, e.g. as a subtask's
-    // parent. Another snapshot of the same task gets its own overlay, so only
-    // the time projection's folds count as carried.
+    // The overlay changes only the snapshot's content, never its clock, and
+    // the edits stay after it in the log. Merging their clocks would also
+    // claim every earlier op of their author, including undeclared writes to
+    // this task (a subtask's estimate, a tag delete), so the server would
+    // accept a snapshot master's clock gets rejected and rebuilt from
+    // post-batch state (review of #10398). With master's clock, the server
+    // accepts it only where master's does, and there it now carries the
+    // edits. An op that touches the task (declares or names it) but is not a
+    // plain edit leaves the snapshot as on master, since the overlay would no
+    // longer be the post-batch value; the time projection's folds are carried.
     const taskId = op.entityId;
     const overlay: Record<string, unknown> = {};
-    const folded: Operation[] = [];
+    let hasOverlay = false;
     for (const incoming of fieldOps) {
-      if (!touchesTask(incoming, taskId) || timeFoldedIds.has(incoming.id)) continue;
+      if (!touchesTask(incoming, taskId) || foldedIds.has(incoming.id)) continue;
       const changes = plainTaskFields(incoming, taskId);
       if (!changes) return op;
       Object.assign(overlay, changes);
-      folded.push(incoming);
+      hasOverlay = true;
     }
-    if (folded.length === 0) return op;
-    folded.forEach((incoming) => foldedIds.add(incoming.id));
-    // The snapshot carries these edits, so its clock must dominate them.
-    const vectorClock = folded.reduce(
-      (clock, incoming) => mergeVectorClocks(clock, incoming.vectorClock),
-      op.vectorClock,
-    );
+    if (!hasOverlay) return op;
     const actionPayload = { ...op.payload.actionPayload, ...overlay };
-    return { ...op, vectorClock, payload: { ...op.payload, actionPayload } };
+    return { ...op, payload: { ...op.payload, actionPayload } };
   };
   const foldSnapshots = (ops: Operation[], timeOps: Operation[]): Promise<Operation[]> =>
     Promise.all(
@@ -266,10 +259,7 @@ export const buildTimeAwareResolutionBatches = async ({
     foldSnapshots(newLocalWinOps, [...nonConflictingOps, ...winningTimeOps]),
     foldSnapshots(localMultiReconciliationOps, nonConflictingOps),
   ]);
-  const timeFoldedIds = new Set(foldedIds);
-  const localWins = timeFoldedLocalWins.map((op) =>
-    foldFieldOps(op, nonConflictingOps, timeFoldedIds),
-  );
+  const localWins = timeFoldedLocalWins.map((op) => foldFieldOps(op, nonConflictingOps));
   // Keep the incoming prefix intact: hoisting a delta alone can move it ahead
   // of an absolute time edit (losing the delta) or the task's CREATE.
   const isFolded = (op: Operation): boolean => foldedIds.has(op.id);

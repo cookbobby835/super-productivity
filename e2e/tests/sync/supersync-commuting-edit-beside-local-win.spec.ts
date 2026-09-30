@@ -8,8 +8,10 @@ import {
   waitForTask,
   markTaskDone,
   recordTaskTimeDelta,
+  getTaskElement,
   type SimulatedE2EClient,
 } from '../../utils/supersync-helpers';
+import { TagPage } from '../../pages/tag.page';
 
 /**
  * Since #10252 (unreleased), a remote edit that touches other fields than a
@@ -71,11 +73,25 @@ const sync = async (client: SimulatedE2EClient): Promise<void> => {
   expect(observed).toBe('in-sync');
 };
 
+/** Records each client's full-state upload, e.g. after repairing invalid state. */
+const recordFullStateUploads = (clients: SimulatedE2EClient[]): string[] => {
+  const uploads: string[] = [];
+  for (const client of clients) {
+    client.page.on('request', (request) => {
+      if (request.method() === 'POST' && request.url().includes('/api/sync/snapshot')) {
+        uploads.push(client.clientName);
+      }
+    });
+  }
+  return uploads;
+};
+
 interface TaskView {
   notes: string | null;
   isDone: boolean;
   timeSpent: number;
   timeEstimate: number;
+  tagIds: string[];
 }
 
 /**
@@ -139,6 +155,7 @@ const onTask = async (
         isDone: current.isDone === true,
         timeSpent: typeof current.timeSpent === 'number' ? current.timeSpent : 0,
         timeEstimate: typeof current.timeEstimate === 'number' ? current.timeEstimate : 0,
+        tagIds: [...((current.tagIds as string[] | undefined) ?? [])],
       };
     },
     { name: taskName, newChanges: changes },
@@ -150,10 +167,12 @@ test.describe('@supersync remote edit beside a local LWW win', () => {
    * tracks time (a pending delta) and marks the task done. `bWins` decides
    * whose done toggle is later and so wins LWW.
    * - Default order (#10385): A uploads the notes edit, then the done toggle.
-   * - `estimateBetween`: A marks the task done, sets an estimate, then edits
-   *   the notes, all uploaded together. The estimate edit commutes with B's
-   *   delta too but is no plain field edit, so it must not be hoisted beside
-   *   the notes edit while the snapshot lacks it (review of #10398).
+   * - `between`: A marks the task done, then writes the task another way,
+   *   then edits the notes, all uploaded together. The snapshot does not
+   *   carry that write, so it must not claim it (review of #10398):
+   *   - `'estimate'`: an estimate edit, which commutes with B's delta too;
+   *   - `'tagDeletion'`: deleting a tag the task has, which declares only the
+   *     tag, so nothing on the task names the write.
    */
   const runCrossing = async (
     {
@@ -162,12 +181,13 @@ test.describe('@supersync remote edit beside a local LWW win', () => {
       testRunId,
     }: { browser: Browser; baseURL?: string; testRunId: string },
     bWins: boolean,
-    estimateBetween = false,
+    between?: 'estimate' | 'tagDeletion',
   ): Promise<void> => {
     const taskName = `NotesBesideLocalWin-${Date.now()}`;
     const notes = 'Notes written on A';
     const trackedOnB = 60000;
-    const estimate = estimateBetween ? 3600000 : 0;
+    const estimate = between === 'estimate' ? 3600000 : 0;
+    const tagName = `BesideLocalWinTag-${Date.now()}`;
     const clients: SimulatedE2EClient[] = [];
 
     try {
@@ -177,6 +197,14 @@ test.describe('@supersync remote edit beside a local LWW win', () => {
       await clientA.sync.setupSuperSync(syncConfig);
       await clientA.workView.addTask(taskName);
       await waitForTask(clientA.page, taskName);
+      const tagPageA = new TagPage(clientA.page);
+      if (between === 'tagDeletion') {
+        await tagPageA.createTag(tagName);
+        await tagPageA.assignTagToTask(
+          getTaskElement(clientA, taskName).first(),
+          tagName,
+        );
+      }
       await clientA.sync.syncAndWait();
 
       const clientB = await createSimulatedClient(browser, baseURL!, 'B', testRunId);
@@ -184,10 +212,13 @@ test.describe('@supersync remote edit beside a local LWW win', () => {
       await clientB.sync.setupSuperSync(syncConfig);
       await clientB.sync.syncAndWait();
       await waitForTask(clientB.page, taskName);
+      const { tagIds } = await onTask(clientB, taskName);
+      expect(tagIds.length).toBe(between === 'tagDeletion' ? 1 : 0);
 
       for (const client of clients) {
         await blockBackgroundSync(client);
       }
+      const fullStateUploads = recordFullStateUploads(clients);
 
       const trackAndMarkDoneOnB = async (): Promise<void> => {
         await recordTaskTimeDelta(clientB, taskName, '2026-07-13', trackedOnB);
@@ -197,6 +228,7 @@ test.describe('@supersync remote edit beside a local LWW win', () => {
           isDone: true,
           timeSpent: trackedOnB,
           timeEstimate: 0,
+          tagIds,
         });
       };
 
@@ -205,18 +237,23 @@ test.describe('@supersync remote edit beside a local LWW win', () => {
         await trackAndMarkDoneOnB();
       }
 
-      if (estimateBetween) {
-        // Done toggle first, then the estimate and the notes edit, in one upload.
+      if (between) {
+        // Done toggle first, then the other write and the notes edit, in one upload.
         await markTaskDone(clientA, taskName);
         if (bWins) {
           await trackAndMarkDoneOnB();
         }
-        await onTask(clientA, taskName, { timeEstimate: estimate });
+        if (between === 'estimate') {
+          await onTask(clientA, taskName, { timeEstimate: estimate });
+        } else {
+          await tagPageA.deleteTag(tagName);
+        }
         expect(await onTask(clientA, taskName, { notes })).toEqual({
           notes,
           isDone: true,
           timeSpent: 0,
           timeEstimate: estimate,
+          tagIds: [],
         });
         await sync(clientA);
       } else {
@@ -226,6 +263,7 @@ test.describe('@supersync remote edit beside a local LWW win', () => {
           isDone: false,
           timeSpent: 0,
           timeEstimate: 0,
+          tagIds: [],
         });
         await sync(clientA);
         await markTaskDone(clientA, taskName);
@@ -248,13 +286,21 @@ test.describe('@supersync remote edit beside a local LWW win', () => {
         return bWins ? { ...task, timeSpent } : task;
       };
       const expected = bWins
-        ? { notes, isDone: true, timeSpent: trackedOnB, timeEstimate: estimate }
-        : { notes, isDone: true, timeEstimate: estimate };
+        ? {
+            notes,
+            isDone: true,
+            timeSpent: trackedOnB,
+            timeEstimate: estimate,
+            tagIds: [],
+          }
+        : { notes, isDone: true, timeEstimate: estimate, tagIds: [] };
       await expect
         .poll(async () => ({ A: await view(clientA), B: await view(clientB) }), {
           timeout: 30000,
         })
         .toEqual({ A: expected, B: expected });
+      // No device had to repair state it found invalid (a deleted tag's id).
+      expect(fullStateUploads).toEqual([]);
     } finally {
       for (const client of clients) {
         await closeClient(client);
@@ -286,7 +332,7 @@ test.describe('@supersync remote edit beside a local LWW win', () => {
     testRunId,
   }) => {
     test.setTimeout(240000);
-    await runCrossing({ browser, baseURL, testRunId }, true, true);
+    await runCrossing({ browser, baseURL, testRunId }, true, 'estimate');
   });
 
   test('an estimate edit between the remote win and the notes edit survives a remote win', async ({
@@ -295,6 +341,15 @@ test.describe('@supersync remote edit beside a local LWW win', () => {
     testRunId,
   }) => {
     test.setTimeout(240000);
-    await runCrossing({ browser, baseURL, testRunId }, false, true);
+    await runCrossing({ browser, baseURL, testRunId }, false, 'estimate');
+  });
+
+  test('a tag deletion between the local win and the notes edit survives a local win', async ({
+    browser,
+    baseURL,
+    testRunId,
+  }) => {
+    test.setTimeout(240000);
+    await runCrossing({ browser, baseURL, testRunId }, true, 'tagDeletion');
   });
 });

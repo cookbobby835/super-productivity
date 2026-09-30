@@ -158,7 +158,7 @@ describe('buildTimeAwareResolutionBatches: readable fields of nonconflicting ops
 
   // #10385: a notes edit that commutes with a pending time delta arrives in
   // the same download as a done toggle this device wins.
-  it('overlays the edit onto a replace snapshot and persists it before the snapshot', async () => {
+  it('overlays the edit onto a replace snapshot and keeps its clock and position', async () => {
     const notesEdit = taskUpdate(
       'op-notes',
       { notes: 'from A' },
@@ -166,9 +166,12 @@ describe('buildTimeAwareResolutionBatches: readable fields of nonconflicting ops
     );
     const { batches, precedingOps } = await build([localWin()], [notesEdit]);
 
-    expect(precedingOps).toEqual([notesEdit]);
-    expect(batches.map((batch) => batch.source)).toEqual(['remote', 'local']);
-    expect(batches[0].ops).toEqual([notesEdit]);
+    // Merging the edit's clock would also claim its author's earlier,
+    // uncarried writes to the task, so the server would accept a snapshot it
+    // rejects on master (review of #10398). The edit stays after the snapshot
+    // and re-applies the same value there on replay.
+    expect(precedingOps).toEqual([]);
+    expect(batches.map((batch) => batch.source)).toEqual(['local']);
     const [snapshot] = localBatchOps(batches);
     expect((snapshot.payload as { actionPayload: unknown }).actionPayload).toEqual({
       id: 'task-1',
@@ -176,7 +179,7 @@ describe('buildTimeAwareResolutionBatches: readable fields of nonconflicting ops
       isDone: true,
       notes: 'from A',
     });
-    expect(snapshot.vectorClock).toEqual({ A: 4, B: 3 });
+    expect(snapshot.vectorClock).toEqual({ A: 2, B: 3 });
   });
 
   it('carries a clear, and lets the later of two edits win a field', async () => {
@@ -312,8 +315,7 @@ describe('buildTimeAwareResolutionBatches: readable fields of nonconflicting ops
   });
 
   // Two local-win snapshots of one task in a batch: each needs the overlay,
-  // or the one without it claims the edit's clock and erases it (fuzz sweep,
-  // tasks:20725016).
+  // or the one without it erases the edit (fuzz sweep, tasks:20725016).
   it('overlays every snapshot of the task, not just the first', async () => {
     const { batches } = await build(
       [localWin(), { ...localWin(), id: 'op-local-win-2' }],

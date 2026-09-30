@@ -410,7 +410,7 @@
   },
   {
     "class": "remote-win-keeps-local-edit",
-    "ref": "#10260 (the time loss); guards #10398's overlay of every local-win snapshot of a task",
+    "ref": "#10260 (the time loss); guards #10398's overlay of every local-win snapshot of a task; the server rejects the snapshot and it is rebuilt, as on master",
     "name": "a notes edit beside two local-win snapshots of a tracked, twice renamed task reaches every device",
     "steps": [
       {
@@ -439,7 +439,7 @@
     ],
     "primary": "time-loss:task",
     "signatures": ["time-loss:task"],
-    "rejections": []
+    "rejections": ["CONFLICT_CONCURRENT [TASK] LWW Update"]
   },
   {
     "class": "auto-plan-blocks-delta-merge",
