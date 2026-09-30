@@ -31,7 +31,7 @@ import {
  * Both tests assert the correct outcome (both clients agree). They are pending
  * (`test.fixme`) because both divergences exist on master: confirmed 3 of 3
  * runs each (2026-09). The PR that fixes one enables its test. (a) is #10260
- * for notes; (b) has no issue yet. The seeded integration runs track both in
+ * for notes; (b) is part of #10379. The seeded integration runs track both in
  * seeded-sync-convergence.integration.spec.ts. All edits go through the real UI.
  */
 

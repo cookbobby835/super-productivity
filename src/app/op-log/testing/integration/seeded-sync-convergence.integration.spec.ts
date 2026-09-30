@@ -108,7 +108,7 @@ const KNOWN_FAILURES: readonly {
     tracking:
       'A whole-note LWW update changes isPinnedToToday without writing ' +
       'note.todayOrder, so a note is listed in Today on one device only. Gap noted ' +
-      'in #10364; no issue. Confirmed with two browsers over WebDAV (2026-09).',
+      'in #10364; tracked in #10379. Confirmed with two browsers over WebDAV (2026-09).',
     witness: 'fields/4',
   },
   {

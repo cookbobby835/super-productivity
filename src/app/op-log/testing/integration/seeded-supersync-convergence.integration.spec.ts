@@ -147,7 +147,7 @@ const KNOWN_FAILURES: readonly {
     tracking:
       'Since #10252 (in no release tag): in one download, a remote edit that ' +
       'commutes with a pending time delta is applied after this device took its ' +
-      'local-win snapshot of the task, so the snapshot erases it elsewhere. No issue. ' +
+      'local-win snapshot of the task, so the snapshot erases it elsewhere. #10385. ' +
       'Confirmed with two browsers: supersync-commuting-edit-beside-local-win.spec.ts.',
     witness: 'tracking/35',
   },
