@@ -243,6 +243,90 @@ describe('buildTimeAwareResolutionBatches: readable fields of nonconflicting ops
     expect(localBatchOps(batches)).toEqual([snapshot]);
   });
 
+  // Review of #10398, finding 1: the estimate edit is hoisted before the
+  // snapshot and dominated by the notes edit's clock, but not carried.
+  it('leaves the snapshot alone when an unfoldable op on the task comes before a plain edit', async () => {
+    const snapshot = localWin();
+    const { batches, precedingOps } = await build(
+      [snapshot],
+      [
+        taskUpdate('op-estimate', { timeEstimate: 3600000 }, { vectorClock: { A: 2 } }),
+        taskUpdate('op-notes', { notes: 'from A' }, { vectorClock: { A: 3 } }),
+      ],
+    );
+
+    expect(precedingOps).toEqual([]);
+    expect(localBatchOps(batches)).toEqual([snapshot]);
+  });
+
+  // Finding 2: a later unfoldable write of the same field is applied after
+  // the snapshot, so the overlay would carry a stale value.
+  it('leaves the snapshot alone when an unfoldable op on the task follows a plain edit', async () => {
+    const snapshot = localWin();
+    const { batches } = await build(
+      [snapshot],
+      [
+        taskUpdate('op-notes', { notes: 'first' }),
+        taskUpdate('op-notes-and-done', { notes: 'second', isDone: false }),
+      ],
+    );
+
+    expect(localBatchOps(batches)).toEqual([snapshot]);
+  });
+
+  it('counts an op that only names the task, like a new subtask, as unfoldable', async () => {
+    const snapshot = localWin();
+    const addSubTask: Operation = {
+      ...taskUpdate('op-add-sub', {}),
+      actionType: '[Task Shared] addSubTask' as ActionType,
+      opType: OpType.Create,
+      entityId: 'sub-1',
+      payload: {
+        actionPayload: { task: { id: 'sub-1', parentId: 'task-1' }, parentId: 'task-1' },
+        entityChanges: [],
+      },
+    };
+    const { batches } = await build(
+      [snapshot],
+      [addSubTask, taskUpdate('op-notes', { notes: 'from A' })],
+    );
+
+    expect(localBatchOps(batches)).toEqual([snapshot]);
+  });
+
+  // Review of #10398, finding 3: a winning delta is folded before the
+  // snapshot and writes no plain field, so it must not disable the fold.
+  it('still folds beside a winning time delta of the task', async () => {
+    const { batches } = await build(
+      [localWin()],
+      [taskUpdate('op-notes', { notes: 'from A' })],
+      [deltaOp({ taskId: 'task-1', date: DAY, duration: 50 })],
+    );
+
+    const snapshot = localBatchOps(batches).find((op) => op.id === 'op-local-win')!;
+    expect(
+      (snapshot.payload as { actionPayload: Record<string, unknown> }).actionPayload[
+        'notes'
+      ],
+    ).toBe('from A');
+  });
+
+  // Two local-win snapshots of one task in a batch: each needs the overlay,
+  // or the one without it claims the edit's clock and erases it (fuzz sweep,
+  // tasks:20725016).
+  it('overlays every snapshot of the task, not just the first', async () => {
+    const { batches } = await build(
+      [localWin(), { ...localWin(), id: 'op-local-win-2' }],
+      [taskUpdate('op-notes', { notes: 'from A' })],
+    );
+
+    const notes = localBatchOps(batches).map(
+      (op) =>
+        (op.payload as { actionPayload: Record<string, unknown> }).actionPayload['notes'],
+    );
+    expect(notes).toEqual(['from A', 'from A']);
+  });
+
   it('leaves a patch snapshot alone: it does not erase fields it does not carry', async () => {
     const patch = localWin('patch', { isDone: true });
     const { batches, precedingOps } = await build(

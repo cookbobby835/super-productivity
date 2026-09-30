@@ -409,6 +409,39 @@
     "rejections": ["CONFLICT_CONCURRENT [TASK] LWW Update"]
   },
   {
+    "class": "remote-win-keeps-local-edit",
+    "ref": "#10260 (the time loss); guards #10398's overlay of every local-win snapshot of a task",
+    "name": "a notes edit beside two local-win snapshots of a tracked, twice renamed task reaches every device",
+    "steps": [
+      {
+        "d": "B",
+        "a": ["renameTask", "t1", "B16"],
+        "s": 1
+      },
+      {
+        "d": "C",
+        "a": ["renameTask", "t1", "C20"],
+        "s": 1
+      },
+      {
+        "d": "A",
+        "a": ["track", "t1", 3000],
+        "s": 1
+      },
+      {
+        "d": "B",
+        "a": ["track", "t1", 4000]
+      },
+      {
+        "d": "A",
+        "a": ["editTaskNotes", "t1", "A28"]
+      }
+    ],
+    "primary": "time-loss:task",
+    "signatures": ["time-loss:task"],
+    "rejections": []
+  },
+  {
     "class": "auto-plan-blocks-delta-merge",
     "ref": "#10378",
     "name": "two devices tracking one unscheduled task lose one device's time",

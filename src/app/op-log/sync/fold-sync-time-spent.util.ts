@@ -110,6 +110,11 @@ const plainTaskFields = (
     : undefined;
 };
 
+/** True when `op` declares `taskId` or names it anywhere in its payload. */
+const touchesTask = (op: Operation, taskId: string): boolean =>
+  getOpEntityIds(op).includes(taskId) ||
+  JSON.stringify(op.payload).includes(JSON.stringify(taskId));
+
 /**
  * A local winner can share an entity with incoming nonconflicting time edits
  * (including edits to its children). Project those edits in their received
@@ -143,11 +148,18 @@ export const buildTimeAwareResolutionBatches = async ({
 }): Promise<{ batches: MixedSourceOperationBatch[]; precedingOps: Operation[] }> => {
   const foldedIds = new Set<string>();
   // A remote winner applied after the snapshot can overwrite a folded field,
-  // so the overlay would no longer be this device's post-batch value.
+  // so the overlay would no longer be this device's post-batch value. A
+  // winning delta is folded before the snapshot and writes no plain field.
   const remoteWinnerTaskIds = new Set(
-    remoteWinsOps.filter((op) => op.entityType === 'TASK').flatMap(getOpEntityIds),
+    remoteWinsOps
+      .filter((op) => op.entityType === 'TASK' && !isSyncTimeSpentOp(op))
+      .flatMap(getOpEntityIds),
   );
-  const foldFieldOps = (op: Operation, fieldOps: Operation[]): Operation => {
+  const foldFieldOps = (
+    op: Operation,
+    fieldOps: Operation[],
+    timeFoldedIds: ReadonlySet<string>,
+  ): Operation => {
     if (
       op.entityType !== 'TASK' ||
       !op.entityId ||
@@ -157,11 +169,21 @@ export const buildTimeAwareResolutionBatches = async ({
     ) {
       return op;
     }
+    // Every incoming op on this task must end up in the snapshot. Folding
+    // merges the folded ops' clocks, and with them the clocks of earlier ops
+    // from the same device; the snapshot then dominates such an op without
+    // carrying its fields, the server accepts it, and receivers lose the edit
+    // where master's rejected snapshot was rebuilt (review of #10398). An op
+    // touches the task when it declares it or names it, e.g. as a subtask's
+    // parent. Another snapshot of the same task gets its own overlay, so only
+    // the time projection's folds count as carried.
+    const taskId = op.entityId;
     const overlay: Record<string, unknown> = {};
     const folded: Operation[] = [];
     for (const incoming of fieldOps) {
-      const changes = plainTaskFields(incoming, op.entityId);
-      if (!changes) continue;
+      if (!touchesTask(incoming, taskId) || timeFoldedIds.has(incoming.id)) continue;
+      const changes = plainTaskFields(incoming, taskId);
+      if (!changes) return op;
       Object.assign(overlay, changes);
       folded.push(incoming);
     }
@@ -244,7 +266,10 @@ export const buildTimeAwareResolutionBatches = async ({
     foldSnapshots(newLocalWinOps, [...nonConflictingOps, ...winningTimeOps]),
     foldSnapshots(localMultiReconciliationOps, nonConflictingOps),
   ]);
-  const localWins = timeFoldedLocalWins.map((op) => foldFieldOps(op, nonConflictingOps));
+  const timeFoldedIds = new Set(foldedIds);
+  const localWins = timeFoldedLocalWins.map((op) =>
+    foldFieldOps(op, nonConflictingOps, timeFoldedIds),
+  );
   // Keep the incoming prefix intact: hoisting a delta alone can move it ahead
   // of an absolute time edit (losing the delta) or the task's CREATE.
   const isFolded = (op: Operation): boolean => foldedIds.has(op.id);

@@ -71,18 +71,25 @@ const sync = async (client: SimulatedE2EClient): Promise<void> => {
   expect(observed).toBe('in-sync');
 };
 
+interface TaskView {
+  notes: string | null;
+  isDone: boolean;
+  timeSpent: number;
+  timeEstimate: number;
+}
+
 /**
- * Sets the task's notes through the store with the action the notes editor
- * dispatches (`TaskService.update`), or only reads; returns what the device
- * holds afterwards.
+ * Applies field changes (notes, estimate) through the store with the action
+ * the task editors dispatch (`TaskService.update`), or only reads; returns
+ * what the device holds afterwards.
  */
 const onTask = async (
   client: SimulatedE2EClient,
   taskName: string,
-  notes?: string,
-): Promise<{ notes: string | null; isDone: boolean; timeSpent: number }> =>
+  changes?: Record<string, unknown>,
+): Promise<TaskView> =>
   client.page.evaluate(
-    async ({ name, newNotes }) => {
+    async ({ name, newChanges }) => {
       type Subscription = { unsubscribe: () => void };
       type StoreLike = {
         subscribe: (next: (state: unknown) => void) => Subscription;
@@ -113,11 +120,11 @@ const onTask = async (
             }
           });
         });
-      if (newNotes !== undefined) {
+      if (newChanges !== undefined) {
         const task = await readTask();
         store.dispatch({
           type: '[Task Shared] updateTask',
-          task: { id: task.id, changes: { notes: newNotes } },
+          task: { id: task.id, changes: newChanges },
           meta: {
             isPersistent: true,
             entityType: 'TASK',
@@ -131,16 +138,22 @@ const onTask = async (
         notes: typeof current.notes === 'string' ? current.notes : null,
         isDone: current.isDone === true,
         timeSpent: typeof current.timeSpent === 'number' ? current.timeSpent : 0,
+        timeEstimate: typeof current.timeEstimate === 'number' ? current.timeEstimate : 0,
       };
     },
-    { name: taskName, newNotes: notes },
+    { name: taskName, newChanges: changes },
   );
 
 test.describe('@supersync remote edit beside a local LWW win', () => {
   /**
-   * A writes notes and a done toggle and uploads them one by one; B, not
-   * synced since the task arrived, tracks time (a pending delta) and marks the
-   * task done. `bWins` decides whose done toggle is later and so wins LWW.
+   * A writes notes and a done toggle; B, not synced since the task arrived,
+   * tracks time (a pending delta) and marks the task done. `bWins` decides
+   * whose done toggle is later and so wins LWW.
+   * - Default order (#10385): A uploads the notes edit, then the done toggle.
+   * - `estimateBetween`: A marks the task done, sets an estimate, then edits
+   *   the notes, all uploaded together. The estimate edit commutes with B's
+   *   delta too but is no plain field edit, so it must not be hoisted beside
+   *   the notes edit while the snapshot lacks it (review of #10398).
    */
   const runCrossing = async (
     {
@@ -149,10 +162,12 @@ test.describe('@supersync remote edit beside a local LWW win', () => {
       testRunId,
     }: { browser: Browser; baseURL?: string; testRunId: string },
     bWins: boolean,
+    estimateBetween = false,
   ): Promise<void> => {
     const taskName = `NotesBesideLocalWin-${Date.now()}`;
     const notes = 'Notes written on A';
     const trackedOnB = 60000;
+    const estimate = estimateBetween ? 3600000 : 0;
     const clients: SimulatedE2EClient[] = [];
 
     try {
@@ -181,6 +196,7 @@ test.describe('@supersync remote edit beside a local LWW win', () => {
           notes: null,
           isDone: true,
           timeSpent: trackedOnB,
+          timeEstimate: 0,
         });
       };
 
@@ -189,18 +205,34 @@ test.describe('@supersync remote edit beside a local LWW win', () => {
         await trackAndMarkDoneOnB();
       }
 
-      // A uploads its notes edit, then its done toggle: B downloads both at once.
-      expect(await onTask(clientA, taskName, notes)).toEqual({
-        notes,
-        isDone: false,
-        timeSpent: 0,
-      });
-      await sync(clientA);
-      await markTaskDone(clientA, taskName);
-      await sync(clientA);
-
-      if (bWins) {
-        await trackAndMarkDoneOnB();
+      if (estimateBetween) {
+        // Done toggle first, then the estimate and the notes edit, in one upload.
+        await markTaskDone(clientA, taskName);
+        if (bWins) {
+          await trackAndMarkDoneOnB();
+        }
+        await onTask(clientA, taskName, { timeEstimate: estimate });
+        expect(await onTask(clientA, taskName, { notes })).toEqual({
+          notes,
+          isDone: true,
+          timeSpent: 0,
+          timeEstimate: estimate,
+        });
+        await sync(clientA);
+      } else {
+        // A uploads its notes edit, then its done toggle: B downloads both at once.
+        expect(await onTask(clientA, taskName, { notes })).toEqual({
+          notes,
+          isDone: false,
+          timeSpent: 0,
+          timeEstimate: 0,
+        });
+        await sync(clientA);
+        await markTaskDone(clientA, taskName);
+        await sync(clientA);
+        if (bWins) {
+          await trackAndMarkDoneOnB();
+        }
       }
 
       await sync(clientB);
@@ -211,15 +243,13 @@ test.describe('@supersync remote edit beside a local LWW win', () => {
       // When B loses, it rejects every pending op of the task, its time delta
       // included, which then never uploads (#10260, also on master before
       // this fix); only the fields this fix covers are compared then.
-      const view = async (
-        client: SimulatedE2EClient,
-      ): Promise<Partial<Awaited<ReturnType<typeof onTask>>>> => {
-        const task = await onTask(client, taskName);
-        return bWins ? task : { notes: task.notes, isDone: task.isDone };
+      const view = async (client: SimulatedE2EClient): Promise<Partial<TaskView>> => {
+        const { timeSpent, ...task } = await onTask(client, taskName);
+        return bWins ? { ...task, timeSpent } : task;
       };
       const expected = bWins
-        ? { notes, isDone: true, timeSpent: trackedOnB }
-        : { notes, isDone: true };
+        ? { notes, isDone: true, timeSpent: trackedOnB, timeEstimate: estimate }
+        : { notes, isDone: true, timeEstimate: estimate };
       await expect
         .poll(async () => ({ A: await view(clientA), B: await view(clientB) }), {
           timeout: 30000,
@@ -248,5 +278,23 @@ test.describe('@supersync remote edit beside a local LWW win', () => {
   }) => {
     test.setTimeout(240000);
     await runCrossing({ browser, baseURL, testRunId }, false);
+  });
+
+  test('an estimate edit between the local win and the notes edit survives a local win', async ({
+    browser,
+    baseURL,
+    testRunId,
+  }) => {
+    test.setTimeout(240000);
+    await runCrossing({ browser, baseURL, testRunId }, true, true);
+  });
+
+  test('an estimate edit between the remote win and the notes edit survives a remote win', async ({
+    browser,
+    baseURL,
+    testRunId,
+  }) => {
+    test.setTimeout(240000);
+    await runCrossing({ browser, baseURL, testRunId }, false, true);
   });
 });
