@@ -213,8 +213,9 @@ added (measured 2026-09 in
    locally against the remote edit, and the reverse) with an E2E, and check
    both timestamp winners. Also run `npm run sync-fuzz:compare` and put its
    output in the PR: a seed that newly shows a failure signature against the
-   base is a regression unless its shrunk trace fails the same way there. The
-   pinned traces miss a known failure that becomes more frequent (#10398).
+   base is a regression unless its shrunk trace fails the same way there (the
+   tool's output says how to shrink one). The pinned traces miss a known
+   failure that becomes more frequent (#10398).
    Admitting an action or removing a safety stop without that proof is not a
    fix (#10264). The `max-lines` cap on
    `conflict-resolution.service.ts` in `eslint.config.js` only goes down, but

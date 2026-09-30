@@ -11,8 +11,11 @@
 // This comparison caught two such regressions in #10398. It runs
 // sync-fuzz-signature-report.benchmark.ts in the working tree and in a
 // temporary worktree of the base ref (sharing node_modules), one after the
-// other, since both use Karma's port. The base run uses the working tree's
-// report benchmark and intent mixes, so both sweep the same seeds.
+// other, since both use Karma's port, and takes 5 to 10 minutes. The base
+// run uses the working tree's report benchmark and intent mixes, so both
+// sweep the same seeds; it warns when other harness files differ, since the
+// base then reports what its own harness detects. An interrupted run removes
+// its worktree too; after a crash, `git worktree prune` cleans up.
 
 const fs = require('node:fs');
 const os = require('node:os');
@@ -22,7 +25,11 @@ const { execFileSync, spawnSync } = require('node:child_process');
 const FUZZ_DIR = 'src/app/op-log/testing/integration/sync-fuzz';
 const REPORT_SPEC = `${FUZZ_DIR}/sync-fuzz-signature-report.benchmark.ts`;
 const SHARED_FILES = [REPORT_SPEC, `${FUZZ_DIR}/sync-fuzz-profiles.ts`];
-const ACTIONS_FILE = `${FUZZ_DIR}/sync-fuzz-actions.ts`;
+const SHRINK_HINT =
+  'To shrink a newly failing seed, set FIRST_SEED to it, SEED_COUNT to 1 and ' +
+  `IGNORE_PINNED to true in ${FUZZ_DIR}/sync-fuzz-seeds.benchmark.ts and run ` +
+  'it with npm run test:file; a seed whose shrunk trace fails the same way ' +
+  'on the base is no regression.';
 const REPORT_PATTERN = /SYNC_FUZZ_REPORT_START(\{.*?\})SYNC_FUZZ_REPORT_END/s;
 
 /** The seeds-by-signature map in a Karma run's output, or undefined. */
@@ -47,6 +54,19 @@ const compareReports = (base, head) => {
   return { newFailures, fixed };
 };
 
+/**
+ * Harness files that differ from the base apart from the ones the base run
+ * borrows, specs, benchmarks (they run only when named) and data: they change
+ * what the base can detect.
+ */
+const harnessDifferences = (changedFiles) =>
+  changedFiles.filter(
+    (file) =>
+      !SHARED_FILES.includes(file) &&
+      !/\.(spec|benchmark)\.ts$/.test(file) &&
+      !file.endsWith('.json'),
+  );
+
 const formatComparison = ({ newFailures, fixed }, label) => {
   const lines = [`Sync fuzz signatures: ${label}`];
   const section = (title, entries) => {
@@ -67,7 +87,10 @@ const git = (cwd, args) =>
     stdio: ['ignore', 'pipe', 'pipe'],
   }).trim();
 
-const runReport = (cwd) => {
+let interrupted = false;
+
+const runReport = (cwd, label) => {
+  console.log(`Running the signature report on ${label}…`);
   // The build imports the git-ignored env.generated.ts; a fresh worktree lacks it.
   execFileSync('node', ['tools/load-env.js', '--ensure'], { cwd, stdio: 'ignore' });
   const result = spawnSync(
@@ -80,6 +103,10 @@ const runReport = (cwd) => {
       maxBuffer: 256 * 1024 * 1024,
     },
   );
+  // spawnSync blocks the event loop, so the SIGINT handler has not run yet;
+  // the child's own exit shows the interrupt.
+  if (result.signal === 'SIGINT' || result.status === 130) interrupted = true;
+  if (interrupted) throw new Error('Interrupted');
   const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
   const report = parseReport(output);
   if (!report) {
@@ -91,12 +118,25 @@ const runReport = (cwd) => {
 const main = () => {
   const baseRef = process.argv[2] ?? 'origin/master';
   const root = git(process.cwd(), ['rev-parse', '--show-toplevel']);
-  if (git(root, ['diff', '--name-only', baseRef, '--', ACTIONS_FILE])) {
+  const baseSha = git(root, ['rev-parse', '--short', baseRef]);
+  const baseLabel = `${baseRef} (${baseSha})`;
+  const differing = harnessDifferences(
+    git(root, ['diff', '--name-only', baseRef, '--', FUZZ_DIR])
+      .split('\n')
+      .filter(Boolean),
+  );
+  if (differing.length > 0) {
     console.warn(
-      `Warning: ${ACTIONS_FILE} differs from ${baseRef}; the base sweeps other traces.`,
+      `Warning: these harness files differ from ${baseLabel}, so the two runs ` +
+        `may detect different signatures:\n  ${differing.join('\n  ')}`,
     );
   }
   const worktree = fs.mkdtempSync(path.join(os.tmpdir(), 'sync-fuzz-base-'));
+  // Without a handler, Ctrl-C would end Node before the cleanup below. The
+  // children get the signal too, so the running report returns at once.
+  process.once('SIGINT', () => {
+    interrupted = true;
+  });
   let comparison;
   try {
     git(root, ['worktree', 'add', '--detach', worktree, baseRef]);
@@ -104,13 +144,20 @@ const main = () => {
     for (const file of SHARED_FILES) {
       fs.copyFileSync(path.join(root, file), path.join(worktree, file));
     }
-    const head = runReport(root);
-    const base = runReport(worktree);
+    const head = runReport(root, 'the working tree');
+    const base = runReport(worktree, baseLabel);
     comparison = compareReports(base, head);
+  } catch (error) {
+    if (interrupted) {
+      process.exitCode = 130;
+      return;
+    }
+    throw error;
   } finally {
     git(root, ['worktree', 'remove', '--force', worktree]);
   }
-  console.log(formatComparison(comparison, `working tree vs ${baseRef}`));
+  console.log(formatComparison(comparison, `working tree vs ${baseLabel}`));
+  if (comparison.newFailures.length > 0) console.log(`\n${SHRINK_HINT}`);
   process.exitCode = comparison.newFailures.length > 0 ? 1 : 0;
 };
 
@@ -118,4 +165,4 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { compareReports, formatComparison, parseReport };
+module.exports = { compareReports, formatComparison, harnessDifferences, parseReport };

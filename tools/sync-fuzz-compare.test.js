@@ -1,7 +1,12 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { compareReports, formatComparison, parseReport } = require('./sync-fuzz-compare');
+const {
+  compareReports,
+  formatComparison,
+  harnessDifferences,
+  parseReport,
+} = require('./sync-fuzz-compare');
 
 test('parses the report between its markers in Karma output', () => {
   const output =
@@ -47,5 +52,21 @@ test('formats both sections', () => {
       '  a: all:4',
       'No longer failing (0)',
     ].join('\n'),
+  );
+});
+
+test('names harness files that change what the base run detects', () => {
+  const dir = 'src/app/op-log/testing/integration/sync-fuzz';
+  assert.deepEqual(
+    harnessDifferences([
+      `${dir}/sync-fuzz-runner.ts`,
+      `${dir}/sync-fuzz-profiles.ts`,
+      `${dir}/sync-fuzz-signature-report.benchmark.ts`,
+      `${dir}/sync-fuzz-pinned.integration.spec.ts`,
+      `${dir}/sync-fuzz-seeds.benchmark.ts`,
+      `${dir}/sync-fuzz-pinned-traces.json`,
+      `${dir}/fake-super-sync-server.ts`,
+    ]),
+    [`${dir}/sync-fuzz-runner.ts`, `${dir}/fake-super-sync-server.ts`],
   );
 });
