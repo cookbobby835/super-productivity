@@ -312,6 +312,9 @@ holds the rules; `ConflictResolutionService._tryCreateFieldPatch` builds the op.
   both sides wrote takes the planner's winner's value, noise fields included
   (`synthesizeMergedChanges`); the old `(timestamp, localOps[0].clientId)`
   noise tiebreak is gone.
+- **Flat snapshots:** an overlapping patch, and a superseded patch, admit
+  only ops whose payload is an `{ id, changes }` update. `moveToOtherProject`
+  carries the full pre-move task, which would write the old `projectId` back.
 - **Aggregation:** an entity's conflicts (one per remote op) resolve together
   as one patch of both full sides (`aggregateEntityConflict`).
 - **Time:** a local `syncTimeSpent` delta is neither in the patch nor
