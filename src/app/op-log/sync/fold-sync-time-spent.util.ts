@@ -11,7 +11,7 @@ import { calcTotalTimeSpent } from '../../features/tasks/util/calc-total-time-sp
 import { initialTaskState, taskReducer } from '../../features/tasks/store/task.reducer';
 import { taskAdapter } from '../../features/tasks/store/task.adapter';
 import { updateTimeSpentForTask } from '../../features/tasks/store/task.reducer.util';
-import { mergeChangedFields } from './conflict-disjoint-merge.util';
+import { mergeChangedFields, NOISE_FIELDS } from './conflict-disjoint-merge.util';
 import { convertOpToAction } from '../apply/operation-converter.util';
 import { getOpEntityIds } from '../util/get-op-entity-ids.util';
 import type { MixedSourceOperationBatch } from '../persistence/operation-log-store.service';
@@ -74,16 +74,21 @@ export const foldSyncTimeSpentDeltas = (
   };
 };
 
-/** Task fields the time projection owns; the field overlay leaves them alone. */
-const TIME_FIELDS: ReadonlySet<string> = new Set(['timeSpentOnDay', 'timeSpent']);
+/**
+ * Task fields `updateTask` assigns as they are. Every other field has derived
+ * or cross-entity writes (`isDone` sets `doneOn`, `timeEstimate` the parent's
+ * total, `projectId`/`tagIds`/`dueDay` the lists), which a field overlay
+ * cannot reproduce, and a time delta's arguments are not task fields (#10147).
+ */
+const PLAIN_TASK_FIELDS: ReadonlySet<string> = new Set(['title', 'notes']);
 
 /**
- * The readable non-time fields a nonconflicting single-task update writes on
- * `taskId`, or undefined when it writes none (opaque, multi-entity, another
- * task, or an LWW row, whose flat payload reads as no fields). A clear keeps
- * its key with the value `undefined`.
+ * The fields a nonconflicting single-task update writes on `taskId`, when all
+ * of them are plain (noise fields aside), else undefined: opaque, multi-entity,
+ * another task, an LWW row (whose flat payload reads as no fields), or a field
+ * with derived writes. A clear keeps its key with the value `undefined`.
  */
-const readableTaskFields = (
+const plainTaskFields = (
   op: Operation,
   taskId: string,
 ): Record<string, unknown> | undefined => {
@@ -99,9 +104,9 @@ const readableTaskFields = (
     return undefined;
   }
   const changes = mergeChangedFields([op], 'task', taskId);
-  const readable = Object.keys(changes).filter((field) => !TIME_FIELDS.has(field));
-  return readable.length > 0
-    ? Object.fromEntries(readable.map((field) => [field, changes[field]]))
+  const fields = Object.keys(changes).filter((field) => !NOISE_FIELDS.has(field));
+  return fields.length > 0 && fields.every((field) => PLAIN_TASK_FIELDS.has(field))
+    ? Object.fromEntries(fields.map((field) => [field, changes[field]]))
     : undefined;
 };
 
@@ -113,11 +118,11 @@ const readableTaskFields = (
  * Keep both decisions together. Live apply still uses the written remote rows
  * and only the local snapshots needed for compensation.
  *
- * The same holds for the readable fields of an incoming nonconflicting task
- * update, e.g. a notes edit that commutes with a pending time delta (#10385):
- * a replace snapshot read before it is applied would erase it on every other
- * device. They are overlaid onto the snapshot, which then carries this
- * device's post-batch value of those fields.
+ * The same holds for an incoming nonconflicting task update of plain fields,
+ * e.g. a notes edit that commutes with a pending time delta (#10385): a
+ * replace snapshot read before it is applied would erase it on every other
+ * device. Its fields are overlaid onto the snapshot, which then carries this
+ * device's post-batch value of them.
  */
 export const buildTimeAwareResolutionBatches = async ({
   unappliedRemoteLosers,
@@ -137,19 +142,25 @@ export const buildTimeAwareResolutionBatches = async ({
   getTask: (taskId: string) => Promise<unknown>;
 }): Promise<{ batches: MixedSourceOperationBatch[]; precedingOps: Operation[] }> => {
   const foldedIds = new Set<string>();
+  // A remote winner applied after the snapshot can overwrite a folded field,
+  // so the overlay would no longer be this device's post-batch value.
+  const remoteWinnerTaskIds = new Set(
+    remoteWinsOps.filter((op) => op.entityType === 'TASK').flatMap(getOpEntityIds),
+  );
   const foldFieldOps = (op: Operation, fieldOps: Operation[]): Operation => {
     if (
       op.entityType !== 'TASK' ||
       !op.entityId ||
       !isLwwUpdatePayload(op.payload) ||
-      op.payload.lwwUpdateMode !== 'replace'
+      op.payload.lwwUpdateMode !== 'replace' ||
+      remoteWinnerTaskIds.has(op.entityId)
     ) {
       return op;
     }
     const overlay: Record<string, unknown> = {};
     const folded: Operation[] = [];
     for (const incoming of fieldOps) {
-      const changes = readableTaskFields(incoming, op.entityId);
+      const changes = plainTaskFields(incoming, op.entityId);
       if (!changes) continue;
       Object.assign(overlay, changes);
       folded.push(incoming);

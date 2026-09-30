@@ -141,12 +141,13 @@ describe('buildTimeAwareResolutionBatches: readable fields of nonconflicting ops
   const build = (
     newLocalWinOps: Operation[],
     nonConflictingOps: Operation[],
+    remoteWinsOps: Operation[] = [],
   ): ReturnType<typeof buildTimeAwareResolutionBatches> =>
     buildTimeAwareResolutionBatches({
       unappliedRemoteLosers: [],
       compensatedRemoteOps: [],
       newLocalWinOps,
-      remoteWinsOps: [],
+      remoteWinsOps,
       localMultiReconciliationOps: [],
       nonConflictingOps,
       getTask: async () => undefined,
@@ -193,16 +194,50 @@ describe('buildTimeAwareResolutionBatches: readable fields of nonconflicting ops
     expect(actionPayload['notes']).toBeUndefined();
   });
 
-  it('leaves the snapshot alone for ops without readable fields of this task', async () => {
+  it('leaves the snapshot alone for ops that are not plain field edits of this task', async () => {
     const snapshot = localWin();
     const ignored = [
       taskUpdate('op-other-task', { notes: 'x' }, { entityId: 'task-2' }),
       taskUpdate('op-multi', { notes: 'x' }, { entityIds: ['task-1', 'task-2'] }),
       taskUpdate('op-opaque', {}),
       taskUpdate('op-time-only', { timeSpentOnDay: { [DAY]: 1 }, timeSpent: 1 }),
+      // `isDone` also sets `doneOn` in the reducer; an overlay cannot.
+      taskUpdate('op-reopen', { isDone: false }),
+      taskUpdate('op-notes-and-done', { notes: 'x', isDone: false }),
       { ...localWin(), id: 'op-remote-lww', clientId: 'A' },
+      // A delta's arguments are not task fields (#10147), although capture
+      // records them as its entity change.
+      {
+        ...deltaOp({ taskId: 'task-1', date: DAY, duration: 50 }),
+        payload: {
+          actionPayload: { taskId: 'task-1', date: DAY, duration: 50 },
+          entityChanges: [
+            {
+              entityType: 'TASK' as EntityType,
+              entityId: 'task-1',
+              opType: OpType.Update,
+              changes: { taskId: 'task-1', date: DAY, duration: 50 },
+            },
+          ],
+        },
+      },
     ];
     const { batches, precedingOps } = await build([snapshot], ignored);
+
+    expect(precedingOps).toEqual([]);
+    expect(localBatchOps(batches)).toEqual([snapshot]);
+  });
+
+  // The remote winner is applied after the snapshot, so a folded field could
+  // differ from this device's post-batch value.
+  it('leaves the snapshot alone when a remote winner of the task follows it', async () => {
+    const snapshot = localWin();
+    const remoteWinner = { ...localWin(), id: 'op-remote-winner', clientId: 'C' };
+    const { batches, precedingOps } = await build(
+      [snapshot],
+      [taskUpdate('op-rename', { title: 'older' })],
+      [remoteWinner],
+    );
 
     expect(precedingOps).toEqual([]);
     expect(localBatchOps(batches)).toEqual([snapshot]);
