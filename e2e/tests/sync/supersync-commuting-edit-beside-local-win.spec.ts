@@ -1,3 +1,4 @@
+import type { Browser } from '@playwright/test';
 import { test, expect } from '../../fixtures/supersync.fixture';
 import {
   createTestUser,
@@ -22,10 +23,12 @@ import {
  * applies the notes edit. B keeps A's notes, but the replace-mode snapshot it
  * uploads has none, and A drops its own notes.
  *
- * The test asserts the correct outcome and is pending (`test.fixme`): master
- * fails it, 4 of 4 runs (2026-09), with A's notes gone on A only. The PR that
- * fixes it enables it. Tracked in #10385; the sync fuzz harness pins the same
- * failure (sync-fuzz-pinned-traces.json, class commuting-edit-beside-local-win).
+ * Before the fix, A's notes were gone on A only (#10385). The local-win
+ * snapshot now carries the readable fields of the same batch's nonconflicting
+ * ops (`buildTimeAwareResolutionBatches`). The second test is the other
+ * conflict direction: A's done toggle is the later one, so B's loses. The sync
+ * fuzz harness pins the same trace (sync-fuzz-pinned-traces.json, class
+ * commuting-edit-beside-local-win).
  */
 
 /** Only explicit syncs run, so every crossing happens in the stated order. */
@@ -134,13 +137,19 @@ const onTask = async (
   );
 
 test.describe('@supersync remote edit beside a local LWW win', () => {
-  test.fixme('a notes edit that commutes with a pending time delta survives a same-batch local win', async ({
-    browser,
-    baseURL,
-    testRunId,
-  }) => {
-    test.setTimeout(240000);
-
+  /**
+   * A writes notes and a done toggle and uploads them one by one; B, not
+   * synced since the task arrived, tracks time (a pending delta) and marks the
+   * task done. `bWins` decides whose done toggle is later and so wins LWW.
+   */
+  const runCrossing = async (
+    {
+      browser,
+      baseURL,
+      testRunId,
+    }: { browser: Browser; baseURL?: string; testRunId: string },
+    bWins: boolean,
+  ): Promise<void> => {
     const taskName = `NotesBesideLocalWin-${Date.now()}`;
     const notes = 'Notes written on A';
     const trackedOnB = 60000;
@@ -165,6 +174,21 @@ test.describe('@supersync remote edit beside a local LWW win', () => {
         await blockBackgroundSync(client);
       }
 
+      const trackAndMarkDoneOnB = async (): Promise<void> => {
+        await recordTaskTimeDelta(clientB, taskName, '2026-07-13', trackedOnB);
+        await markTaskDone(clientB, taskName);
+        expect(await onTask(clientB, taskName)).toEqual({
+          notes: null,
+          isDone: true,
+          timeSpent: trackedOnB,
+        });
+      };
+
+      // B's done toggle is the earlier one when A should win.
+      if (!bWins) {
+        await trackAndMarkDoneOnB();
+      }
+
       // A uploads its notes edit, then its done toggle: B downloads both at once.
       expect(await onTask(clientA, taskName, notes)).toEqual({
         notes,
@@ -175,35 +199,54 @@ test.describe('@supersync remote edit beside a local LWW win', () => {
       await markTaskDone(clientA, taskName);
       await sync(clientA);
 
-      // B, not synced since the task arrived: tracked time (a pending delta),
-      // then its own done toggle, later than A's, so B wins the LWW conflict.
-      await recordTaskTimeDelta(clientB, taskName, '2026-07-13', trackedOnB);
-      await markTaskDone(clientB, taskName);
-      expect(await onTask(clientB, taskName)).toEqual({
-        notes: null,
-        isDone: true,
-        timeSpent: trackedOnB,
-      });
+      if (bWins) {
+        await trackAndMarkDoneOnB();
+      }
 
       await sync(clientB);
       await sync(clientA);
       await sync(clientB);
 
       // Both devices, in one assertion, so a failure shows the divergence.
-      const expected = { notes, isDone: true, timeSpent: trackedOnB };
+      // When B loses, it rejects every pending op of the task, its time delta
+      // included, which then never uploads (#10260, also on master before
+      // this fix); only the fields this fix covers are compared then.
+      const view = async (
+        client: SimulatedE2EClient,
+      ): Promise<Partial<Awaited<ReturnType<typeof onTask>>>> => {
+        const task = await onTask(client, taskName);
+        return bWins ? task : { notes: task.notes, isDone: task.isDone };
+      };
+      const expected = bWins
+        ? { notes, isDone: true, timeSpent: trackedOnB }
+        : { notes, isDone: true };
       await expect
-        .poll(
-          async () => ({
-            A: await onTask(clientA, taskName),
-            B: await onTask(clientB, taskName),
-          }),
-          { timeout: 30000 },
-        )
+        .poll(async () => ({ A: await view(clientA), B: await view(clientB) }), {
+          timeout: 30000,
+        })
         .toEqual({ A: expected, B: expected });
     } finally {
       for (const client of clients) {
         await closeClient(client);
       }
     }
+  };
+
+  test('a notes edit that commutes with a pending time delta survives a same-batch local win', async ({
+    browser,
+    baseURL,
+    testRunId,
+  }) => {
+    test.setTimeout(240000);
+    await runCrossing({ browser, baseURL, testRunId }, true);
+  });
+
+  test('a notes edit that commutes with a pending time delta survives a same-batch remote win', async ({
+    browser,
+    baseURL,
+    testRunId,
+  }) => {
+    test.setTimeout(240000);
+    await runCrossing({ browser, baseURL, testRunId }, false);
   });
 });

@@ -313,8 +313,8 @@
   },
   {
     "class": "commuting-edit-beside-local-win",
-    "ref": "#10385",
-    "name": "a task notes edit downloaded beside a done toggle the device wins is lost on the writing device",
+    "ref": "fixed by the #10385 fix (regression pin)",
+    "name": "a task notes edit downloaded beside a done toggle the device wins survives on the writing device",
     "steps": [
       {
         "d": "A",
@@ -334,8 +334,7 @@
         "a": ["doneTask", "t1", true]
       }
     ],
-    "primary": "divergence:.task.entities.*.notes",
-    "signatures": ["divergence:.task.entities.*.notes", "field-reverted:task.notes"],
+    "signatures": [],
     "rejections": []
   },
   {
