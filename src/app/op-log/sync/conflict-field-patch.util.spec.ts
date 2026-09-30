@@ -103,6 +103,28 @@ describe('conflict-field-patch.util', () => {
       expect(isFieldPatchEligible(sides([opaque], remote), 'local')).toBeFalse();
     });
 
+    it("refuses an overlap with a flat-snapshot op such as moveToOtherProject's", () => {
+      // Its payload is the full PRE-move task: read as fields it would write
+      // the old projectId back.
+      const move = (projectId: string): Operation =>
+        op({
+          actionType: '[Task Shared] moveToOtherProject' as ActionType,
+          payload: {
+            actionPayload: {
+              task: { id: 'task-1', projectId, title: 't', subTasks: [] },
+              targetProjectId: 'P-new',
+            },
+            entityChanges: [],
+          },
+        });
+      expect(
+        isFieldPatchEligible(sides([move('P1')], [move('P1')]), 'local'),
+      ).toBeFalse();
+      expect(
+        supersededPatchFields([move('P1')], 'TASK' as EntityType, 'task', 'task-1'),
+      ).toBeUndefined();
+    });
+
     it('refuses a side that changed only noise fields', () => {
       expect(
         isFieldPatchEligible(

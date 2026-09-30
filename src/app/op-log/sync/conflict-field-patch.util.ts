@@ -12,7 +12,7 @@
  * No Angular, no I/O.
  */
 
-import { deepEqual } from '@sp/sync-core';
+import { deepEqual, extractActionPayload } from '@sp/sync-core';
 import { ActionType, isLwwUpdatePayload, OpType } from '../core/operation.types';
 import type { EntityConflict, Operation, VectorClock } from '../core/operation.types';
 import type { EntityType } from '../core/operation.types';
@@ -49,6 +49,26 @@ const isSyncTimeSpentOp = (op: Operation): boolean =>
 /** The ops whose fields the patch carries: a time delta never is one. */
 const fieldOps = (ops: Operation[]): Operation[] =>
   ops.filter((op) => !isSyncTimeSpentOp(op));
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/**
+ * True for an op whose payload states its change as `{ id, changes }`. Some
+ * readable actions carry a flat entity instead, e.g. `moveToOtherProject`'s
+ * full PRE-move task: read as fields, it would write the old `projectId` (and
+ * `subTasks`) back. Today's disjoint merge never overlaps with such a
+ * snapshot, but a patch of overlapping fields or of a rejected edit must not
+ * take its values.
+ */
+const isChangesShapedOp = (
+  op: Operation,
+  payloadKey: string,
+  entityId: string,
+): boolean => {
+  const entity = extractActionPayload(op.payload)?.[payloadKey];
+  return isRecord(entity) && entity['id'] === entityId && isRecord(entity['changes']);
+};
 
 export interface FieldPatchSides {
   localOps: Operation[];
@@ -103,6 +123,9 @@ export const isFieldPatchEligible = (
   }
   if (isDisjointMergeEligible(sides)) {
     return true;
+  }
+  if (!fieldOps(allOps).every((op) => isChangesShapedOp(op, payloadKey, entityId))) {
+    return false;
   }
   const changes = buildFieldPatchChanges(sides, winner);
   return !REMINDER_FIELDS.some(
@@ -284,7 +307,8 @@ export const supersededPatchFields = (
         op.opType !== OpType.Update ||
         isMultiEntityOperation(op) ||
         isAdditiveTimeOp(op) ||
-        isOpaqueChangeOp(op, payloadKey, entityId),
+        isOpaqueChangeOp(op, payloadKey, entityId) ||
+        !isChangesShapedOp(op, payloadKey, entityId),
     )
   ) {
     return undefined;
