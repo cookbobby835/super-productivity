@@ -111,6 +111,8 @@ import {
   isAdditiveTimeOp,
   isCommutingTimeDeltaCrossing,
   isDisjointMergeEligible,
+  keptTimeDeltasOfRemoteWins,
+  rebaseKeptTimeDeltas,
   mergeChangedFields,
   synthesizeMergedChanges,
   NOISE_FIELDS,
@@ -1001,9 +1003,13 @@ export class ConflictResolutionService {
       ...additionalLocalIntentOps,
     ]);
     const { remoteWinnerAffectedEntityKeys } = lwwPartitions;
-    const localOpsToReject = [...new Set(lwwPartitions.localOpsToReject)];
+    // #10408: kept deltas are rebased past their winners below, not rejected.
+    const kept = keptTimeDeltasOfRemoteWins(resolutions, this._resolvePayloadKey('TASK'));
+    const localOpsToReject = [...new Set(lwwPartitions.localOpsToReject)].filter(
+      (opId) => !kept.opIds.has(opId),
+    );
     const localOpsToRejectSet = new Set(localOpsToReject);
-    const protectedLocalResolutionOpIds = new Set<string>();
+    const protectedLocalResolutionOpIds = new Set<string>(kept.opIds);
     let writtenLocalWinOps: Operation[] = [];
     const writtenMergedOpIds = new Set<string>();
 
@@ -1841,6 +1847,7 @@ export class ConflictResolutionService {
         `ConflictResolutionService: Marked ${remainingRemoteOpsToReject.length} remote ops as rejected`,
       );
     }
+    await rebaseKeptTimeDeltas(this.opLogStore, kept);
 
     // ─────────────────────────────────────────────────────────────────────────
     // STEP 5: Show non-blocking notification

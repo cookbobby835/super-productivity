@@ -710,6 +710,27 @@
     ]
   },
   {
+    "class": "time-delta-remote-win",
+    "ref": "fixed by the #10408 fix (regression pin)",
+    "name": "a delta tracked beside a notes edit that loses to a later notes edit reaches every device",
+    "steps": [
+      {
+        "d": "B",
+        "a": ["editTaskNotes", "t1", "B18"]
+      },
+      {
+        "d": "B",
+        "a": ["track", "t1", 5000]
+      },
+      {
+        "d": "A",
+        "a": ["editTaskNotes", "t1", "A29"]
+      }
+    ],
+    "signatures": [],
+    "rejections": []
+  },
+  {
     "class": "coverage",
     "ref": "coverage trace: no known bug",
     "name": "a task archived on one device and restored on another converges across compactions and restarts",

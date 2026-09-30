@@ -16,7 +16,8 @@
  */
 
 import { ActionType, OpType } from '../core/operation.types';
-import type { Operation } from '../core/operation.types';
+import type { Operation, VectorClock } from '../core/operation.types';
+import { mergeVectorClocks } from '../../core/util/vector-clock';
 import {
   extractActionPayload,
   extractEntityFromPayload,
@@ -366,6 +367,101 @@ export const isCommutingTimeDeltaCrossing = (params: {
   [...params.localOps, ...params.remoteOps].some(
     (op) => op.actionType === ActionType.TIME_TRACKING_SYNC_TIME_SPENT,
   ) && isDisjointMergeEligible(params);
+
+/**
+ * The local `syncTimeSpent` deltas of a conflict the remote side won that
+ * commute with the winner (#10408): neither side deletes or declares more
+ * than one entity, and the winning ops write no time field, neither as a
+ * value nor through an opaque op such as a whole-entity LWW snapshot. Such a
+ * delta adds to whatever the winner leaves, so it can stay pending instead of
+ * being rejected with the rest of the losing side, which kept it on this
+ * device only.
+ */
+export const timeDeltasCommutingWithRemoteWin = (params: {
+  localOps: Operation[];
+  remoteOps: Operation[];
+  payloadKey: string;
+  entityId: string;
+}): Operation[] => {
+  const { localOps, remoteOps, payloadKey, entityId } = params;
+  const deltas = localOps.filter(
+    (op) => op.actionType === ActionType.TIME_TRACKING_SYNC_TIME_SPENT,
+  );
+  // A local delete or multi-entity op makes the winner recreate or rewrite
+  // the task from its own snapshot, which lacks this device's time.
+  if (
+    deltas.length === 0 ||
+    [...localOps, ...remoteOps].some(
+      (op) => op.opType === OpType.Delete || isMultiEntityOperation(op),
+    )
+  ) {
+    return [];
+  }
+  const remote = sideNonNoiseKeys(remoteOps, payloadKey, entityId);
+  return remote && !SYNC_TIME_SPENT_FIELDS.some((field) => remote.absolute.has(field))
+    ? deltas
+    : [];
+};
+
+/**
+ * #10408: the local `syncTimeSpent` deltas that stay pending although the
+ * remote side won, because they commute with every winner they conflict with
+ * (`timeDeltasCommutingWithRemoteWin`). A delta that also sits in any other
+ * conflict is not kept: a local win's snapshot already carries its time.
+ * Returns the kept ids and the clock of the winners they must follow.
+ */
+export const keptTimeDeltasOfRemoteWins = (
+  resolutions: readonly {
+    conflict: {
+      entityType: string;
+      entityId: string;
+      localOps: Operation[];
+      remoteOps: Operation[];
+    };
+    winner: 'local' | 'remote';
+  }[],
+  payloadKey: string,
+): { opIds: Set<string>; clockToDominate: VectorClock } => {
+  const commuting = new Set<string>();
+  const excluded = new Set<string>();
+  let clockToDominate: VectorClock = {};
+  for (const { conflict, winner } of resolutions) {
+    const kept =
+      winner === 'remote' && conflict.entityType === 'TASK'
+        ? timeDeltasCommutingWithRemoteWin({ ...conflict, payloadKey })
+        : [];
+    const keptIds = new Set(kept.map((op) => op.id));
+    for (const op of conflict.localOps) {
+      (keptIds.has(op.id) ? commuting : excluded).add(op.id);
+    }
+    if (kept.length > 0) {
+      for (const op of conflict.remoteOps) {
+        clockToDominate = mergeVectorClocks(clockToDominate, op.vectorClock);
+      }
+    }
+  }
+  const opIds = new Set([...commuting].filter((opId) => !excluded.has(opId)));
+  return { opIds, clockToDominate };
+};
+
+/**
+ * Moves the kept deltas past their winners in place (id, seq and payload
+ * stay), so each uploads once and replays once. Skips the store when nothing
+ * was kept: the rebase opens a write transaction.
+ */
+export const rebaseKeptTimeDeltas = async (
+  store: {
+    rebasePendingLocalOps: (
+      opIds: readonly string[],
+      clockToDominate: VectorClock,
+    ) => Promise<unknown>;
+  },
+  kept: { opIds: Set<string>; clockToDominate: VectorClock },
+): Promise<void> => {
+  if (kept.opIds.size > 0) {
+    await store.rebasePendingLocalOps([...kept.opIds], kept.clockToDominate);
+  }
+};
 
 /**
  * Synthesizes the merged CHANGES DELTA — the union of both sides' changed

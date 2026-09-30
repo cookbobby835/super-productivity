@@ -2,9 +2,12 @@ import {
   hasOpaqueChanges,
   isAdditiveTimeOp,
   isDisjointMergeEligible,
+  keptTimeDeltasOfRemoteWins,
   mergeChangedFields,
   MergeSideMeta,
   noiseTiebreakSide,
+  rebaseKeptTimeDeltas,
+  timeDeltasCommutingWithRemoteWin,
   touchesCrossEntityTaskFields,
 } from './conflict-disjoint-merge.util';
 import { ActionType, EntityType, OpType, Operation } from '../core/operation.types';
@@ -543,6 +546,119 @@ describe('conflict-disjoint-merge.util', () => {
       });
       expect(mergeChangedFields([junkOp], 'task', 'task-1')).toEqual({});
       expect(hasOpaqueChanges([junkOp], 'task', 'task-1')).toBe(true);
+    });
+  });
+
+  // #10408: a local time delta that loses with the rest of its side.
+  describe('timeDeltasCommutingWithRemoteWin', () => {
+    const delta = syncTimeSpentOp({ id: 'local-delta', clientId: 'B' });
+    const localDone = op({
+      id: 'local-done',
+      clientId: 'B',
+      payload: { task: { id: 'task-1', changes: { isDone: true } } },
+    });
+    const remoteDone = op({
+      id: 'remote-done',
+      payload: { task: { id: 'task-1', changes: { isDone: true } } },
+    });
+    const commuting = (localOps: Operation[], remoteOps: Operation[]): string[] =>
+      timeDeltasCommutingWithRemoteWin({
+        localOps,
+        remoteOps,
+        payloadKey: 'task',
+        entityId: 'task-1',
+      }).map((kept) => kept.id);
+
+    it('keeps the delta beside a winner that writes no time field', () => {
+      expect(commuting([delta, localDone], [remoteDone])).toEqual(['local-delta']);
+      expect(commuting([delta], [syncTimeSpentOp({ id: 'remote-delta' })])).toEqual([
+        'local-delta',
+      ]);
+    });
+
+    it('rejects it beside a winner that writes time or cannot be read', () => {
+      const remoteTime = op({
+        payload: { task: { id: 'task-1', changes: { timeSpentOnDay: { [DAY]: 1 } } } },
+      });
+      const remoteSnapshot = op({
+        actionType: '[TASK] LWW Update' as ActionType,
+        payload: {
+          actionPayload: { id: 'task-1', title: 'T', timeSpentOnDay: {} },
+          entityChanges: [],
+          lwwUpdateMode: 'replace',
+        },
+      });
+      expect(commuting([delta], [remoteTime])).toEqual([]);
+      expect(commuting([delta], [remoteSnapshot])).toEqual([]);
+      expect(commuting([delta], [removeTimeSpentOp()])).toEqual([]);
+      expect(commuting([delta], [convertToSubTaskOp()])).toEqual([]);
+    });
+
+    it('rejects it when either side deletes or declares several entities', () => {
+      const deleteOp = op({ opType: OpType.Delete });
+      const bulk = op({ entityIds: ['task-1', 'task-2'] });
+      expect(commuting([delta], [deleteOp])).toEqual([]);
+      expect(commuting([delta, deleteOp], [remoteDone])).toEqual([]);
+      expect(commuting([delta], [bulk])).toEqual([]);
+    });
+  });
+
+  describe('keptTimeDeltasOfRemoteWins', () => {
+    const delta = syncTimeSpentOp({ id: 'local-delta', clientId: 'B' });
+    const remoteDone = op({
+      id: 'remote-done',
+      vectorClock: { A: 5 },
+      payload: { task: { id: 'task-1', changes: { isDone: true } } },
+    });
+    const conflict = (
+      remoteOps: Operation[],
+    ): {
+      entityType: string;
+      entityId: string;
+      localOps: Operation[];
+      remoteOps: Operation[];
+    } => ({ entityType: 'TASK', entityId: 'task-1', localOps: [delta], remoteOps });
+
+    it('keeps a delta every conflict of which is a commuting remote win', () => {
+      const kept = keptTimeDeltasOfRemoteWins(
+        [{ conflict: conflict([remoteDone]), winner: 'remote' }],
+        'task',
+      );
+      expect([...kept.opIds]).toEqual(['local-delta']);
+      expect(kept.clockToDominate).toEqual({ A: 5 });
+    });
+
+    // A local win's snapshot already carries the delta's time.
+    it('drops a delta that also sits in a local win or a non-commuting remote win', () => {
+      const snapshotWinner = op({
+        id: 'remote-snapshot',
+        payload: {
+          actionPayload: { id: 'task-1', title: 'T' },
+          entityChanges: [],
+          lwwUpdateMode: 'replace',
+        },
+      });
+      for (const other of [
+        { conflict: conflict([remoteDone]), winner: 'local' as const },
+        { conflict: conflict([snapshotWinner]), winner: 'remote' as const },
+      ]) {
+        const kept = keptTimeDeltasOfRemoteWins(
+          [{ conflict: conflict([remoteDone]), winner: 'remote' }, other],
+          'task',
+        );
+        expect(kept.opIds.size).toBe(0);
+      }
+    });
+
+    it('rebases only when something was kept', async () => {
+      const store = jasmine.createSpyObj('store', ['rebasePendingLocalOps']);
+      await rebaseKeptTimeDeltas(store, { opIds: new Set(), clockToDominate: {} });
+      expect(store.rebasePendingLocalOps).not.toHaveBeenCalled();
+      await rebaseKeptTimeDeltas(store, {
+        opIds: new Set(['local-delta']),
+        clockToDominate: { A: 5 },
+      });
+      expect(store.rebasePendingLocalOps).toHaveBeenCalledWith(['local-delta'], { A: 5 });
     });
   });
 });
