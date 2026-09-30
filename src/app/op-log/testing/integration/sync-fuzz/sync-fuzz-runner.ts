@@ -4,7 +4,8 @@ import { Note } from '../../../../features/note/note.model';
 import { Project } from '../../../../features/project/project.model';
 import { SimpleCounter } from '../../../../features/simple-counter/simple-counter.model';
 import { Task } from '../../../../features/tasks/task.model';
-import { FULL_STATE_OP_TYPES } from '../../../core/operation.types';
+import { compareVectorClocks } from '../../../../core/util/vector-clock';
+import { FULL_STATE_OP_TYPES, VectorClock } from '../../../core/operation.types';
 import {
   AppStateSnapshot,
   StateSnapshotService,
@@ -20,6 +21,7 @@ import {
   Intent,
   IntentWeights,
   isUiPossible,
+  REPLACEMENT_INTENTS,
   SETUP_INTENTS,
   viewOf,
 } from './sync-fuzz-actions';
@@ -27,6 +29,7 @@ import {
   FuzzDevice,
   FuzzEvent,
   FuzzEventKind,
+  ImportDialogAnswer,
   SyncFuzzHarness,
 } from './sync-fuzz-harness';
 
@@ -55,7 +58,11 @@ export interface FuzzOptions {
   seed?: number;
   steps?: FuzzStep[];
   stepCount?: number;
-  /** Intent mix for generated traces (default DEFAULT_WEIGHTS). */
+  /**
+   * Intent mix for generated traces (default DEFAULT_WEIGHTS). A mix with a
+   * state replacement also answers the SYNC_IMPORT conflict dialog on every
+   * step (`k`).
+   */
   weights?: IntentWeights;
   debug?: boolean;
 }
@@ -65,6 +72,16 @@ const SYNC_PROBABILITY = 0.35;
 const COMPACT_PROBABILITY = 0.1;
 const RESTART_PROBABILITY = 0.1;
 const SETTLE_ROUNDS = 6;
+/** How often a generated step keeps local data in the SYNC_IMPORT conflict dialog. */
+const USE_LOCAL_PROBABILITY = 0.3;
+/**
+ * Full-state ops that only a user's replacement intent creates: the force
+ * upload (also the dialog's USE_LOCAL) and the backup import.
+ */
+const USER_REPLACEMENT_REASONS: Readonly<Record<string, string>> = {
+  SYNC_IMPORT: 'FORCE_UPLOAD',
+  BACKUP_IMPORT: 'BACKUP_RESTORE',
+};
 const FAILING_EVENTS: readonly FuzzEventKind[] = [
   'stop',
   'sync-error',
@@ -88,6 +105,17 @@ export const createRandom = (seed: number): (() => number) => {
   };
 };
 
+/** One executed intent, with the acting device's vector clock after it. */
+interface LedgerEntry {
+  intent: Intent;
+  writes: FuzzWrite[];
+  device: string;
+  clientId: string;
+  clock: VectorClock;
+  /** Its device answered USE_REMOTE before the server accepted it. */
+  discarded?: boolean;
+}
+
 /** What the executed intents imply, for the preservation oracles. */
 class Ledger {
   readonly created = new Set<string>();
@@ -96,8 +124,13 @@ class Ledger {
   readonly tracked = new Map<string, number>();
   readonly writes = new Map<string, unknown[]>();
 
-  note(intent: Intent, writes: FuzzWrite[]): void {
+  constructor(entries: readonly LedgerEntry[]) {
+    for (const { intent, writes } of entries) this._note(intent, writes);
+  }
+
+  private _note(intent: Intent, writes: FuzzWrite[]): void {
     const [kind, id] = intent;
+    if (REPLACEMENT_INTENTS.has(kind)) return;
     const type = /Task|^track$/.test(kind)
       ? 'task'
       : /Note$/.test(kind)
@@ -116,6 +149,47 @@ class Ledger {
     }
   }
 }
+
+/**
+ * What the last state replacement on the server (a SYNC_IMPORT or
+ * BACKUP_IMPORT) legitimately discards. Every device drops the ops that are
+ * not causally after it (CONCURRENT or LESS_THAN by vector clock), by design
+ * (AGENTS.md sync rule 7). So the preservation oracles check only the intents
+ * whose device clock is at or after the replacement's, on top of the
+ * replacement's own content: its entities and tracked time.
+ */
+interface Replacement {
+  clock: VectorClock;
+  entities: Set<string>;
+  time: Map<string, number>;
+}
+
+const lastReplacement = (harness: SyncFuzzHarness): Replacement | undefined => {
+  const row = [...harness.server.rows]
+    .reverse()
+    .find((r) => r.op.opType === 'SYNC_IMPORT' || r.op.opType === 'BACKUP_IMPORT');
+  if (!row) return undefined;
+  const state = row.op.payload as unknown as Partial<CheckedState>;
+  const entities = new Set<string>();
+  const time = new Map<string, number>();
+  const day = fuzzDay();
+  for (const task of [
+    ...Object.values(state.task?.entities ?? {}),
+    ...Object.values(state.archiveYoung?.task.entities ?? {}),
+  ]) {
+    if (!task) continue;
+    entities.add(`task:${task.id}`);
+    time.set(`task:${task.id}`, task.timeSpentOnDay?.[day] ?? 0);
+  }
+  for (const id of state.note?.ids ?? []) entities.add(`note:${id}`);
+  for (const id of state.simpleCounter?.ids ?? []) entities.add(`habit:${id}`);
+  return { clock: row.op.vectorClock, entities, time };
+};
+
+const isAtOrAfter = (clock: VectorClock, replacement: VectorClock): boolean => {
+  const comparison = compareVectorClocks(clock, replacement);
+  return comparison === 'GREATER_THAN' || comparison === 'EQUAL';
+};
 
 const valueAt = (source: unknown, path: string[]): unknown =>
   path.reduce<unknown>(
@@ -181,6 +255,9 @@ export const comparable = (state: unknown): unknown =>
       : value,
   );
 
+const answerOf = (k: FuzzStep['k']): ImportDialogAnswer | undefined =>
+  k === 'L' ? 'USE_LOCAL' : k === 'R' ? 'USE_REMOTE' : undefined;
+
 const shortJson = (value: unknown): string => JSON.stringify(value)?.slice(0, 160) ?? '';
 
 /**
@@ -197,7 +274,7 @@ const eventSignature = (event: FuzzEvent): string => {
   return stop
     ? `stop:${stop[1]}`
     : `${event.kind}:${event.detail
-        .replace(/\b[tnh]\d+\b|fuzzDev\w|[0-9a-f-]{36}/g, '*')
+        .replace(/\b[tnhb]\d+\b|fuzzDev\w|\b[BEAI]_[A-Za-z0-9]{6}\b|[0-9a-f-]{36}/g, '*')
         .slice(0, 120)}`;
 };
 
@@ -208,7 +285,7 @@ const pathSignature = (path: string): string =>
     .slice(0, 6)
     .map((part, i, parts) =>
       parts[i - 1] === 'entities' ||
-      /^\d+$|^[tnh]\d+$|^fuzzDev|^\d{4}-\d{2}-\d{2}$/.test(part)
+      /^\d+$|^[tnh]\d+$|^fuzzDev|^[BEAI]_[A-Za-z0-9]{6}$|^\d{4}-\d{2}-\d{2}$/.test(part)
         ? '*'
         : part,
     )
@@ -229,7 +306,44 @@ export const runFuzz = async (options: FuzzOptions): Promise<FuzzResult> => {
       });
     }
   };
-  const ledger = new Ledger();
+  const entries: LedgerEntry[] = [];
+  const note = async (intent: Intent, writes: FuzzWrite[]): Promise<void> => {
+    const device = harness.current!;
+    const clock = (await TestBed.inject(OperationLogStoreService).getVectorClock()) ?? {};
+    entries.push({
+      intent,
+      writes,
+      device: device.name,
+      clientId: device.clientId,
+      clock,
+    });
+  };
+  /**
+   * Syncs `device`, answering the SYNC_IMPORT conflict dialog with `answer`.
+   * USE_REMOTE rebuilds the device from the server's history, discarding its
+   * changes the server never accepted, as the dialog says: the ledger
+   * excuses those intents.
+   */
+  const sync = async (device: FuzzDevice, answer?: ImportDialogAnswer): Promise<void> => {
+    const before = harness.events.length;
+    harness.importDialogAnswer = answer;
+    await harness.sync(device);
+    harness.importDialogAnswer = undefined;
+    const usedRemote = harness.events
+      .slice(before)
+      .some((e) => e.kind === 'import-dialog' && e.detail === 'USE_REMOTE');
+    if (!usedRemote) return;
+    for (const entry of entries) {
+      if (entry.device !== device.name || entry.discarded) continue;
+      const accepted = Math.max(
+        0,
+        ...harness.server.rows
+          .filter((row) => row.op.clientId === entry.clientId)
+          .map((row) => row.op.vectorClock[entry.clientId] ?? 0),
+      );
+      if ((entry.clock[entry.clientId] ?? 0) > accepted) entry.discarded = true;
+    }
+  };
   const devices = new Map<string, FuzzDevice>();
   for (const name of DEVICES) devices.set(name, await harness.addDevice(name));
   const deviceOf = (name: string): FuzzDevice => devices.get(name)!;
@@ -237,10 +351,10 @@ export const runFuzz = async (options: FuzzOptions): Promise<FuzzResult> => {
   // Setup: A creates the shared entities, then every device joins.
   await harness.as(deviceOf('A'), async () => {
     for (const intent of SETUP_INTENTS) {
-      ledger.note(intent, (await executeIntent(harness, intent)) ?? []);
+      await note(intent, (await executeIntent(harness, intent)) ?? []);
     }
   });
-  for (const name of DEVICES) await harness.sync(deviceOf(name));
+  for (const name of DEVICES) await sync(deviceOf(name));
 
   const executed: FuzzStep[] = [];
   const runStep = async (step: FuzzStep, intent?: Intent): Promise<void> => {
@@ -251,12 +365,12 @@ export const runFuzz = async (options: FuzzOptions): Promise<FuzzResult> => {
       await harness.as(device, async () => {
         const writes = await executeIntent(harness, intent);
         if (writes) {
-          ledger.note(intent, writes);
+          await note(intent, writes);
           applied = intent;
         }
       });
     }
-    if (step.s) await harness.sync(device);
+    if (step.s) await sync(device, answerOf(step.k));
     if (step.c) await harness.compact(device);
     if (step.r) await harness.restart(device);
     if (applied || step.s || step.c || step.r) {
@@ -266,6 +380,7 @@ export const runFuzz = async (options: FuzzOptions): Promise<FuzzResult> => {
         ...(step.s ? { s: 1 } : {}),
         ...(step.c ? { c: 1 } : {}),
         ...(step.r ? { r: 1 } : {}),
+        ...(step.s && step.k ? { k: step.k } : {}),
       });
     }
   };
@@ -274,6 +389,9 @@ export const runFuzz = async (options: FuzzOptions): Promise<FuzzResult> => {
     for (const step of options.steps) await runStep(step, step.a);
   } else {
     const random = createRandom(options.seed ?? 1);
+    const replaces = (options.weights ?? []).some(([kind]) =>
+      REPLACEMENT_INTENTS.has(kind),
+    );
     let idCounter = 10;
     const nextId = (prefix: string): string => `${prefix}${++idCounter}`;
     for (let i = 0; i < (options.stepCount ?? 30); i++) {
@@ -288,6 +406,7 @@ export const runFuzz = async (options: FuzzOptions): Promise<FuzzResult> => {
           `${name}${i}`,
           nextId,
           options.weights,
+          [...harness.backups.keys()],
         );
         if (generated && !isUiPossible(generated, view)) {
           throw new Error(
@@ -302,25 +421,28 @@ export const runFuzz = async (options: FuzzOptions): Promise<FuzzResult> => {
           ...(random() < SYNC_PROBABILITY ? { s: 1 } : {}),
           ...(random() < COMPACT_PROBABILITY ? { c: 1 } : {}),
           ...(random() < RESTART_PROBABILITY ? { r: 1 } : {}),
+          ...(replaces ? { k: random() < USE_LOCAL_PROBABILITY ? 'L' : 'R' } : {}),
         },
         intent,
       );
     }
   }
 
-  // Settle: every device syncs until a full round moves nothing.
+  // Settle: every device syncs until a full round moves nothing. A dialog
+  // asking about an incoming replacement is answered with the remote data,
+  // which ends a run of competing replacements.
   harness.tick();
   for (let round = 0; round < SETTLE_ROUNDS; round++) {
     const seqBefore = harness.server.latestSeq;
     let pending = 0;
     for (const name of DEVICES) {
-      await harness.sync(deviceOf(name));
+      await sync(deviceOf(name), 'USE_REMOTE');
       pending += await harness.pendingOpCount(deviceOf(name));
     }
     if (harness.server.latestSeq === seqBefore && pending === 0) break;
   }
   const observer = await harness.addDevice('F');
-  await harness.sync(observer);
+  await sync(observer, 'USE_REMOTE');
 
   const eventsBeforeRestart = harness.events.length;
   // Oracle: no stops or other sync failures.
@@ -329,14 +451,17 @@ export const runFuzz = async (options: FuzzOptions): Promise<FuzzResult> => {
     fail(eventSignature(event), `step ${event.step} ${event.device}: ${event.detail}`);
   }
 
-  // Oracle: nothing pending, no full-state op anywhere.
+  // Oracle: nothing pending, no full-state op anywhere but the user's own
+  // replacements.
   for (const name of DEVICES) {
     const device = deviceOf(name);
     const pending = await harness.pendingOpCount(device);
     if (pending > 0) fail('pending', `${name} has ${pending} unsynced op(s)`);
     const fullState = await harness.as(device, async () =>
-      (await TestBed.inject(OperationLogStoreService).getOpsAfterSeq(0)).filter((e) =>
-        FULL_STATE_OP_TYPES.has(e.op.opType),
+      (await TestBed.inject(OperationLogStoreService).getOpsAfterSeq(0)).filter(
+        (e) =>
+          FULL_STATE_OP_TYPES.has(e.op.opType) &&
+          USER_REPLACEMENT_REASONS[e.op.opType] !== e.op.syncImportReason,
       ),
     );
     for (const entry of fullState) fail(`full-state-op:${entry.op.opType}`, `${name}`);
@@ -363,7 +488,19 @@ export const runFuzz = async (options: FuzzOptions): Promise<FuzzResult> => {
     }
   }
 
-  checkPreservation(reference, ledger, fail);
+  const replacement = lastReplacement(harness);
+  checkPreservation(
+    reference,
+    new Ledger(
+      entries.filter(
+        (entry) =>
+          !entry.discarded &&
+          (!replacement || isAtOrAfter(entry.clock, replacement.clock)),
+      ),
+    ),
+    replacement,
+    fail,
+  );
 
   // Oracle: a restart (hydration from the device's own database) keeps state.
   for (const name of DEVICES) {
@@ -489,6 +626,7 @@ const checkTodayNotes = (
 const checkPreservation = (
   snapshot: AppStateSnapshot,
   ledger: Ledger,
+  replacement: Replacement | undefined,
   fail: (signature: string, detail: string) => void,
 ): void => {
   const state = snapshot as unknown as CheckedState;
@@ -505,15 +643,22 @@ const checkPreservation = (
     return found as Record<string, unknown> | undefined;
   };
 
-  for (const entity of ledger.created) {
+  for (const entity of new Set([...ledger.created, ...(replacement?.entities ?? [])])) {
     if (!ledger.deleted.has(entity) && !entityOf(entity)) {
       fail(`lost-entity:${entity.split(':')[0]}`, `${entity} was never deleted`);
     }
   }
 
   const day = fuzzDay();
-  for (const [entity, expected] of ledger.tracked) {
+  const trackedTasks = new Set([
+    ...ledger.tracked.keys(),
+    ...(replacement?.time.keys() ?? []),
+  ]);
+  for (const entity of trackedTasks) {
     if (ledger.deleted.has(entity) || ledger.archivedEver.has(entity)) continue;
+    const expected =
+      (replacement?.time.get(entity) ?? 0) + (ledger.tracked.get(entity) ?? 0);
+    if (!ledger.tracked.has(entity) && expected === 0) continue;
     const task = entityOf(entity) as Task | undefined;
     const actual = task?.timeSpentOnDay?.[day] ?? 0;
     if (actual !== expected) {

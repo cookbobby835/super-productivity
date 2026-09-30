@@ -8,11 +8,17 @@ import { TaskSharedActions } from '../../../../root-store/meta/task-shared.actio
 import { VectorClock } from '../../../core/operation.types';
 import { OperationLogStoreService } from '../../../persistence/operation-log-store.service';
 import {
+  DEFAULT_WEIGHTS,
   DeviceView,
   executeIntent,
+  FuzzStep,
   generateIntent,
+  Intent,
   isUiPossible,
+  REPLACEMENT_INTENTS,
+  REPLACEMENT_WEIGHTS,
 } from './sync-fuzz-actions';
+import { FakeSuperSyncServer } from './fake-super-sync-server';
 import { FuzzDevice, SyncFuzzHarness } from './sync-fuzz-harness';
 import { comparable, createRandom, runFuzz } from './sync-fuzz-runner';
 
@@ -171,6 +177,51 @@ describe('SyncFuzzHarness: negative control', () => {
       .withContext(JSON.stringify(failures))
       .toBeTrue();
   }, 60_000);
+
+  it('the oracles still check a write made after a replacement', async () => {
+    // B applies A's force upload, then renames: a write after the
+    // replacement, which the oracles check, unlike B's discarded edit.
+    const steps: FuzzStep[] = [
+      { d: 'B', a: ['renameTask', 't2', 'discarded'] },
+      { d: 'A', a: ['forceUpload'] },
+      { d: 'B', s: 1, k: 'R' },
+      { d: 'B', a: ['renameTask', 't1', 'after'], s: 1 },
+    ];
+    const kept = await runFuzz({ steps });
+    expect(kept.failures.map((f) => f.signature))
+      .withContext(JSON.stringify(kept.failures))
+      .not.toContain('field-reverted:task.title');
+
+    // ...until the server loses the rename while acknowledging it.
+    const uploadBatch = FakeSuperSyncServer.prototype.uploadBatch;
+    spyOn(FakeSuperSyncServer.prototype, 'uploadBatch').and.callFake(function (
+      this: FakeSuperSyncServer,
+      ...args: Parameters<FakeSuperSyncServer['uploadBatch']>
+    ) {
+      const [ops, ...rest] = args;
+      const isLost = (op: (typeof ops)[number]): boolean =>
+        JSON.stringify(op.payload).includes('"after"');
+      const results = uploadBatch.call(
+        this,
+        ops.filter((op) => !isLost(op)),
+        ...rest,
+      );
+      return ops.map(
+        (op) =>
+          results.find((r) => r.opId === op.id) ?? {
+            opId: op.id,
+            accepted: true,
+            serverSeq: this.latestSeq,
+          },
+      );
+    });
+
+    const { failures } = await runFuzz({ steps });
+
+    expect(failures.map((f) => f.signature))
+      .withContext(JSON.stringify(failures))
+      .toContain('field-reverted:task.title');
+  }, 60_000);
 });
 
 describe('sync fuzz generator', () => {
@@ -217,5 +268,35 @@ describe('sync fuzz generator', () => {
     ]);
     expect(isUiPossible(['editNote', 'nT', 'isPinnedToToday', false], view)).toBeFalse();
     expect(isUiPossible(['countHabit', 'hOff'], view)).toBeFalse();
+  });
+
+  it('replaces state only in the replacement mix, and imports only exported backups', () => {
+    const random = createRandom(11);
+    let id = 0;
+    const kinds = new Set<Intent[0]>();
+    for (let i = 0; i < 3_000; i++) {
+      const backups = i < 1_500 ? [] : ['b1'];
+      const intent = generateIntent(
+        random,
+        view,
+        [],
+        `L${i}`,
+        (p) => `${p}${++id}`,
+        REPLACEMENT_WEIGHTS,
+        backups,
+      );
+      if (!intent) continue;
+      expect(isUiPossible(intent, view)).withContext(JSON.stringify(intent)).toBeTrue();
+      if (intent[0] === 'importBackup') expect(backups).toContain(intent[1]);
+      kinds.add(intent[0]);
+      const plain = generateIntent(random, view, [], `M${i}`, (p) => `${p}${++id}`);
+      expect(plain && REPLACEMENT_INTENTS.has(plain[0])).toBeFalsy();
+    }
+    expect([...kinds].filter((kind) => REPLACEMENT_INTENTS.has(kind)).sort()).toEqual([
+      'exportBackup',
+      'forceUpload',
+      'importBackup',
+    ]);
+    expect(DEFAULT_WEIGHTS.some(([kind]) => REPLACEMENT_INTENTS.has(kind))).toBeFalse();
   });
 });

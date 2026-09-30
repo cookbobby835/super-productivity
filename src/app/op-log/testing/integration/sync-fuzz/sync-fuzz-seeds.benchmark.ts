@@ -1,4 +1,9 @@
-import { DEFAULT_WEIGHTS, FuzzStep, IntentWeights } from './sync-fuzz-actions';
+import {
+  DEFAULT_WEIGHTS,
+  FuzzStep,
+  IntentWeights,
+  REPLACEMENT_WEIGHTS,
+} from './sync-fuzz-actions';
 import { SyncFuzzHarness } from './sync-fuzz-harness';
 import pinnedTraces from './sync-fuzz-pinned-traces.json';
 import { FuzzFailure, FuzzResult, runFuzz } from './sync-fuzz-runner';
@@ -34,7 +39,9 @@ const IGNORE_PINNED = false;
 /**
  * Intent mixes. `noReorder` leaves out the reorder wedge, a stop that masks
  * every later failure on the stopped device; `tasks` concentrates on task
- * edits crossing tracked time.
+ * edits crossing tracked time; `replace` adds the state replacements the UI
+ * offers (force upload, backup export and import) and answers the SYNC_IMPORT
+ * conflict dialog. A new mix leaves the other mixes' traces unchanged.
  */
 const PROFILES: Record<string, IntentWeights> = {
   all: DEFAULT_WEIGHTS,
@@ -47,6 +54,7 @@ const PROFILES: Record<string, IntentWeights> = {
     ['track', 4],
     ['doneTask', 1],
   ],
+  replace: REPLACEMENT_WEIGHTS,
 };
 
 /** Traces to replay with a full dump, e.g. while triaging a pin. */
