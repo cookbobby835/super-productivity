@@ -138,14 +138,6 @@ const KNOWN_FAILURES: readonly {
   {
     signature: 'time:lost',
     tracking:
-      '#10340: the server rejects a pending time delta that crossed an edit, and ' +
-      'the re-sent task snapshot turns it into an absolute value that a later ' +
-      'snapshot overwrites. Fixed by #10340.',
-    witness: 'tracking/1',
-  },
-  {
-    signature: 'time:lost',
-    tracking:
       '#10257 class: a local-win task snapshot carries tracked time as an absolute ' +
       'value, and a newer concurrent edit elsewhere replaces the whole task.',
     witness: 'edits/3',
