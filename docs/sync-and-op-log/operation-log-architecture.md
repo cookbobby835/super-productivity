@@ -80,9 +80,9 @@ The Operation Log enables two types of synchronization:
 
 **B. File-provider operation transport**
 
-- The v2 format stores a full state/archive baseline and a bounded recent-op
+- The default v2 format stores a full state/archive baseline and a bounded recent-op
   buffer in one `sync-data.json`; each op-bearing upload rewrites that monolith.
-- The v3 split format makes `sync-ops.json` the hot commit point and rewrites
+- The opt-in v3 split format makes `sync-ops.json` the hot commit point and rewrites
   the snapshot/archive file only for bootstrap, compaction, migration, force-upload,
   or gap recovery.
 - Both formats feed the same client operation-log pipeline. See
@@ -112,7 +112,7 @@ The Operation Log serves **four distinct purposes**:
 | Purpose                    | Description                                       | Status       |
 | -------------------------- | ------------------------------------------------- | ------------ |
 | **A. Local Persistence**   | Fast writes, crash recovery, event sourcing       | Complete ✅  |
-| **B. File-Based Sync**     | Existing v2 monolith or v3 split files            | Complete ✅  |
+| **B. File-Based Sync**     | Default v2 monolith or opt-in v3 split files      | Complete ✅  |
 | **C. Server Sync**         | Upload/download individual operations (SuperSync) | Complete ✅¹ |
 | **D. Validation & Repair** | Prevent corruption, auto-repair invalid state     | Complete ✅  |
 
@@ -753,10 +753,10 @@ records only the durable format boundary and its owners.
 
 ## B.1 Two Current Wire Formats
 
-| Format                                 | Remote files                                                                                          | Normal op-bearing sync                                                                                                                                                      |
-| -------------------------------------- | ----------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **v2 monolith (existing folders)**     | `sync-data.json` plus recovery backup                                                                 | Downloads the changed monolith, merges its retained ops, rebuilds current state plus both archive partitions, and conditionally rewrites the complete monolith.             |
-| **v3 split files (new empty folders)** | `sync-ops.json`, referenced snapshot generation, compatibility state/backup files, and a v2 tombstone | Conditionally rewrites the bounded ops commit point. A full state/archive snapshot is written only for initial bootstrap, compaction, migration, force-upload, or recovery. |
+| Format                                      | Remote files                                                                                          | Normal op-bearing sync                                                                                                                                                      |
+| ------------------------------------------- | ----------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **v2 monolith (default)**                   | `sync-data.json` plus recovery backup                                                                 | Downloads the changed monolith, merges its retained ops, rebuilds current state plus both archive partitions, and conditionally rewrites the complete monolith.             |
+| **v3 split files (opt-in “Surgical sync”)** | `sync-ops.json`, referenced snapshot generation, compatibility state/backup files, and a v2 tombstone | Conditionally rewrites the bounded ops commit point. A full state/archive snapshot is written only for initial bootstrap, compaction, migration, force-upload, or recovery. |
 
 Both formats carry a vector clock, schema version, synthetic `syncVersion`, and
 a bounded `recentOps` buffer. That common adapter and envelope do not themselves
@@ -779,9 +779,14 @@ Where the provider enforces CAS, a revision mismatch aborts the write and a
 later cycle downloads before retrying. The best-effort backends cannot broadly
 guarantee that every simultaneous write race will abort.
 
-With no saved format preference, discovery selects existing v2/v3 files and
-uses v3 only for an empty folder. Saved `isUseSplitSyncFiles: false` keeps v2
-behavior; `true` explicitly opts into migration. Provider errors never establish
+With no saved format preference, discovery joins existing v2/v3 files, and an
+empty folder gets `EMPTY_FOLDER_SYNC_FORMAT` in `file-based-sync-format.ts`: v2,
+as in v19.1. The v3 empty-folder default (#10289) stays off until its snapshot,
+interrupted-write and legacy-overwrite follow-ups land. Discovery ignores v16
+`__meta_` files; the v2/v3 readers still stop normal syncs with
+`LegacySyncFormatDetectedError`, and a confirmed force overwrite writes the
+empty-folder format. Saved `isUseSplitSyncFiles: false` keeps v2 behavior;
+`true` explicitly opts into migration. Provider errors never establish
 emptiness. Discovery is target-scoped, in memory, and does not persist a choice.
 
 The v3 migration is one-way for a sync folder. It leaves a v3 tombstone in the
@@ -1064,6 +1069,43 @@ When operations are rejected (either local or remote):
 - `getUnsynced()` excludes rejected ops (won't re-upload)
 - Compaction may eventually delete old rejected ops
 
+A rejection explained by a commuting task-time crossing is not replaced
+(#10214): conflict detection applies a remote edit that commutes with a task's
+pending time work and leaves the pending ops alone, so their clocks miss it and
+the server rejects them. When the rejection's `existingClock` is the clock of
+that applied remote row, every pending op of the task moves past it in place
+(`rebaseCommutingTimeDeltaRejections` → `rebasePendingLocalOps`): same id, seq
+and payload, fresh clock. A replacement op would replay a `syncTimeSpent` delta
+twice (the rejected original still replays, or a snapshot already holds it), and
+an LWW snapshot would turn the delta into an absolute write over a third
+device's concurrent time. The applied row is the causal proof, so no seq-0
+re-download is needed. The snapshot path runs instead unless every condition
+below holds:
+
+- **Every moved op was rejected by this upload**, which stored none of them on
+  the server. Any other pending op may be one that another tab uploaded and has
+  not marked synced yet (acknowledgements are deferred past piggyback
+  processing). The move also holds the UPLOAD lock, so no other tab uploads
+  meanwhile.
+- **Moved ops commute with every later op of the task the server already
+  accepted from this client** (`isDisjointMergeEligible`). Next to a crossing
+  delta the server accepts this client's own delta and then each later op, which
+  dominates it. Receivers apply the moved ops after those, so a moved first
+  rename would win over an accepted second rename. Ops of any entity type that
+  declare the task count, such as a planner move.
+- **Neither side touches `tagIds`, `projectId`, `parentId`, `dueDay` or
+  `dueWithTime`** (`touchesCrossEntityTaskFields`). Ops of other entity types
+  write those fields in their reducers without declaring the task (deleting a
+  tag rewrites every task's `tagIds`), so no check here sees them. A moved tag
+  assignment would land after a tag deletion and revive the deleted tag.
+
+A raised counter of an op the state cache covers is written into the cache clock
+too, because boot rebuilds the durable clock from that clock plus the op tail.
+Snapshot saves and compaction clear the per-tab clock cache before they read the
+clock, so no tab writes a state cache that misses a counter another tab raised
+in place. The write re-asserts the sync epoch first (see "The sync-epoch fence"
+in the contributor sync model).
+
 ### Archive-Wins Rule
 
 When a `moveToArchive` operation conflicts with a field-level update (e.g., rename, time tracking changes), the archive operation **always wins** regardless of timestamps. This bypasses the normal LWW timestamp comparison because archiving represents explicit user intent that should not be reversed by a concurrent field update.
@@ -1305,12 +1347,17 @@ and
 
 ### Compaction Trigger Coordination
 
-The 500-ops compaction trigger uses a persistent counter stored in `state_cache.compactionCounter`:
+The 500-ops compaction trigger (`COMPACTION_THRESHOLD`) counts in memory, in
+`OperationLogEffects`:
 
-- Each atomic append increments the durable counter
-- Counter persists across app restarts
-- Counter is reset after successful compaction
-- The in-memory mirror avoids an IndexedDB read on every threshold check
+- Each local operation write increments the counter; at the threshold a
+  background compaction starts
+- The counter resets after a compaction that ran; it does not survive a restart
+- Across restarts, the hydrator's startup check (`compactIfBloated()`) compacts
+  once per boot when the log holds more than `STARTUP_COMPACTION_OP_THRESHOLD`
+  ops, some of them synced
+- Nothing increments `state_cache.compactionCounter` any more: it only seeds the
+  in-memory counter (in practice 0), and compaction resets it
 
 ### Device Identity and Legacy Data
 
@@ -1348,7 +1395,7 @@ during the periodic full young-to-old flush.
 Archive partitions can contain tens of thousands of tasks and worklogs. Treating
 them as an always-rewritten remote file makes a small archive transition pay for
 the whole historical dataset. The cost depends on the transport: default v2
-file sync still rewrites that full baseline, while SuperSync and v3
+file sync still rewrites that full baseline, while SuperSync and the opt-in v3
 file format can normally transfer the operation without rewriting a remote
 archive snapshot.
 
@@ -1365,7 +1412,7 @@ partitions.
 | --------------------- | -------------------------------------------------------------------------------------------------------------- |
 | **SuperSync**         | The archive operation payload; no separate archive-file upload.                                                |
 | **File v2 (default)** | The operation buffer plus complete state, `archiveYoung`, and `archiveOld` in the rewritten monolith.          |
-| **File v3**           | Normally the operation in `sync-ops.json`; complete archive partitions when a snapshot is created or replaced. |
+| **File v3 (opt-in)**  | Normally the operation in `sync-ops.json`; complete archive partitions when a snapshot is created or replaced. |
 
 ### E.3 Workflow: moveToArchive
 
