@@ -16,6 +16,8 @@ owners are:
 - `e2e/tests/sync/supersync-reorder-conflict-wedge.spec.ts`
 - `e2e/tests/sync/supersync-issue-provider-reorder-conflict.spec.ts`
 - `e2e/tests/sync/supersync-reorder-single-entity-rule.spec.ts`
+- `e2e/tests/sync/supersync-reorder-competing-and-delete.spec.ts`
+- `e2e/tests/sync/webdav-reorder-competing-and-delete.spec.ts`
 
 ## Why generic entity LWW is insufficient
 
@@ -62,9 +64,11 @@ The recognized crossings are:
 
 - a move and removal of the same task from the move's source section;
 - a section-order update crossing a placement/removal that touches one of the
-  ordered sections; and
+  ordered sections;
 - a content reorder crossing a single-entity patch of an entity it lists, under
-  the structural rule below.
+  the structural rule below; and
+- two note orders or two habit orders, or a note order and the delete of a
+  note it lists (#10377, below).
 
 A reorder writes exactly one ordered list per context: `project.noteIds` for
 project notes, `note.todayOrder` for Today and every tag view,
@@ -103,8 +107,41 @@ reissued as a pin, and released receivers prepend a pin without deduplication.
 The current pin reducer is idempotent, so hydration can replay a rejected pin
 and its reissue.
 
-Deletions, container moves, competing reorders and Today membership against a
-Today or tag reorder are not recognized. Missing, ambiguous, malformed or
+Two reorders that share an entity, and a reorder against the delete of a listed
+note, converge once the remote op applies and the pending reorder is reissued
+from the resulting state (`isReissuedReorderCrossing`, #10377). The admitted
+lists are `project.noteIds`, `note.todayOrder` and `simpleCounter.ids`:
+
+- **Competing orders of one list:** the remote order applies over the pending
+  one and the reissue carries the list as it now stands, so the order that
+  reached the server first wins. Either device's order may survive (#10264's
+  decision); timestamps do not decide. Every Today and tag order writes
+  `note.todayOrder`, so they compete with each other.
+- **A project order against a Today or tag order:** each writes only its own
+  list, so both survive.
+- **A note delete:** the delete wins. A pending reorder is reissued without the
+  deleted id and keeps its positions of the other notes. A remote order applied
+  over a pending delete drops the id, because both note lists keep only ids
+  already in them (`projectReducer`'s `updateNoteOrder` filters `noteIds` for
+  this since #10377; a dangling id crashed the notes panel).
+- **File-based providers never reject an upload,** so every provider reissues
+  at download time (`reissueCrossedPendingReorders`, called by
+  `RemoteOpsProcessingService` after it applies the batch) with the same causal
+  proof: the crossing remote row is the retained, applied one. Without it,
+  competing orders diverge on WebDAV (verified by disabling it). An unproven
+  reorder stays pending for the server-rejection path. A reissue skipped
+  because live state may hold an unpersisted change, or lost to a crash after
+  the apply, runs on the next download, since the scan covers every retained
+  applied remote row. Known gap: on a file-based provider an upload before
+  that download still sends the stale original, whose receivers apply both
+  ops in arrival order.
+
+A habit delete keeps the stop: a habit order fills the slots of the habits it
+lists, so a delete shifts them around an unlisted (disabled) habit and the two
+application orders differ. Boards, sections and issue providers keep the stop
+for competing orders and deletes: `sortIssueProvidersFirst` keeps deleted ids,
+and none of these crossings has an E2E yet. Container moves and Today membership against a Today or tag
+reorder are not recognized either. Missing, ambiguous, malformed or
 non-commuting evidence does not admit replay. Recognized content reorders
 (including section reorders) then remain pending with
 `UnsupportedMultiEntityConflictError`: generic entity LWW loses list writes.
@@ -199,6 +236,12 @@ reissued over its own pin, and that it keeps a StopWatch habit's type after a
 reissued settings edit. File-based providers never reissue: every client applies
 both original ops, which commute on released reducers because Today membership
 is admitted only against project orders.
+
+The #10377 reissues are ordinary `updateNoteOrder` and
+`updateSimpleCounterOrder` ops carrying the full current list, the same shape
+as the reissues above, with a clock that dominates the remote op, so released
+receivers apply them after it in any arrival order. A released client that
+holds the pending side still stops, as before.
 
 ## Verification
 

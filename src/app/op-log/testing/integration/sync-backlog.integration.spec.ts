@@ -220,9 +220,10 @@ describe('Sync backlog longer than one download pass (integration)', () => {
         { provide: OperationWriteFlushService, useValue: writeFlushSpy },
         {
           provide: SupersededOperationResolverService,
-          useValue: jasmine.createSpyObj('SupersededOperationResolverService', [
-            'resolveSupersededLocalOps',
-          ]),
+          useValue: jasmine.createSpyObj('SupersededOperationResolverService', {
+            resolveSupersededLocalOps: undefined,
+            reissueCrossedPendingReorders: Promise.resolve(0),
+          }),
         },
         {
           provide: SyncHydrationService,

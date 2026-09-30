@@ -44,9 +44,12 @@ import { Task } from '../../features/tasks/task.model';
 import {
   areCommutingReorderAndContentOperations,
   isContentReorderOperation,
+  isReissuableReorder,
+  isReissuedReorderCrossing,
   isReorderConflictOperation,
   projectReorderConflictAgainstState,
   ReorderReplaySnapshot,
+  selectCrossedPendingReorders,
 } from './reorder-conflict.util';
 import { UnsupportedMultiEntityConflictError } from '../core/errors/sync-errors';
 import {
@@ -226,7 +229,9 @@ export class SupersededOperationResolverService {
     const row = this._findAppliedConflictRow(item, context);
     return row &&
       (areCommutingSectionOperations(item.op, row.op) ||
-        areCommutingReorderAndContentOperations(item.op, row.op))
+        areCommutingReorderAndContentOperations(item.op, row.op) ||
+        (isContentReorderOperation(item.op) &&
+          isReissuedReorderCrossing(item.op, row.op)))
       ? 'replay'
       : 'fallback';
   }
@@ -463,12 +468,13 @@ export class SupersededOperationResolverService {
     supersededOps: SupersededOperation[],
     extraClocks?: VectorClock[],
     snapshotVectorClock?: VectorClock,
+    callerHoldsLock = false,
   ): Promise<number> {
     // Acquire lock to prevent race conditions with operation capture and other sync operations.
     // Without this lock, user actions during conflict resolution could write ops with
     // superseded vector clocks, leading to data corruption.
     let result = 0;
-    await this.lockService.request(LOCK_NAMES.OPERATION_LOG, async () => {
+    const resolve = async (): Promise<void> => {
       const clientId = await this.clientIdProvider.loadClientId();
       if (!clientId) {
         OpLog.err(
@@ -859,7 +865,50 @@ export class SupersededOperationResolverService {
       }
 
       result = newOpsCreated.length - auxiliaryOpIds.size;
-    });
+    };
+    if (callerHoldsLock) await resolve();
+    else await this.lockService.request(LOCK_NAMES.OPERATION_LOG, resolve);
     return result;
+  }
+
+  /**
+   * #10377: reissues each pending reorder that crossed an applied remote
+   * reorder or note delete (`isReissuedReorderCrossing`), as the rejection path
+   * above does once the server refuses it. File-based providers never refuse an
+   * upload: without this, receivers would apply the stale original over the
+   * remote op and diverge. It scans every retained applied remote row, so a
+   * reissue skipped here heals on a later download. The same causal proof
+   * applies; an unproven reorder stays pending for the rejection path, and so
+   * does every reorder while live state may hold an unpersisted change.
+   * The caller holds the OPERATION_LOG lock.
+   */
+  async reissueCrossedPendingReorders(): Promise<number> {
+    const pending = (await this.opLogStore.getUnsynced()).map(({ op }) => op);
+    if (!pending.some(isReissuableReorder)) return 0;
+    const entries = await this.opLogStore.getOpsAfterSeq(0);
+    const applied = entries
+      .filter(
+        (entry) =>
+          entry.source === 'remote' &&
+          entry.applicationStatus === 'applied' &&
+          entry.rejectedAt === undefined,
+      )
+      .map(({ op }) => op);
+    const context = buildSectionCausalReplayContext(entries);
+    const proven = selectCrossedPendingReorders(pending, applied).filter(
+      (item) => this._getSectionCausalReplayDecision(item, context) === 'replay',
+    );
+    if (proven.length === 0 || getPhantomChangeRisk(this.operationCapture)) return 0;
+    try {
+      return await this.resolveSupersededLocalOps(proven, undefined, undefined, true);
+    } catch (e) {
+      // Projection throws before writing anything when a change arrives meanwhile.
+      if (!getPhantomChangeRisk(this.operationCapture)) throw e;
+      OpLog.normal(
+        'SupersededOperationResolverService: Deferred crossed reorder reissue ' +
+          'while a local change awaits persistence.',
+      );
+      return 0;
+    }
   }
 }

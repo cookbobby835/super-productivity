@@ -572,19 +572,22 @@ export const projectReducer = createReducer<ProjectState>(
       : state,
   ),
 
-  on(updateNoteOrder, (state, { ids, activeContextType, activeContextId }) =>
-    activeContextType === WorkContextType.PROJECT
+  on(updateNoteOrder, (state, { ids, activeContextType, activeContextId }) => {
+    const project = state.entities[activeContextId as string];
+    return activeContextType === WorkContextType.PROJECT && project
       ? projectAdapter.updateOne(
           {
-            id: activeContextId as string,
+            id: project.id,
             changes: {
-              noteIds: ids,
+              // A remote order can list a note this device deleted or moved
+              // away concurrently (#10377); it must not come back as a dangling id.
+              noteIds: ids.filter((id) => project.noteIds.includes(id)),
             },
           },
           state,
         )
-      : state,
-  ),
+      : state;
+  }),
 
   // Task Actions
   // ------------
