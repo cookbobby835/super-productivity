@@ -814,7 +814,7 @@
   },
   {
     "class": "time-delta-remote-win",
-    "ref": "fixed by the #10408 fix (regression pin)",
+    "ref": "fixed by #10413 (regression pin)",
     "name": "a delta tracked beside a notes edit that loses to a later notes edit reaches every device",
     "steps": [
       {
