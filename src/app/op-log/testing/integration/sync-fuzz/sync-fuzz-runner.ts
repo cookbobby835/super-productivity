@@ -522,6 +522,18 @@ export const runFuzz = async (options: FuzzOptions): Promise<FuzzResult> => {
       fail(`restart-${event.kind}:${event.detail.slice(0, 80)}`, `${event.device}`);
     }
   }
+  // A REPAIR or failed validation is rare and hard to replay from its
+  // signature alone: its failure carries the whole run.
+  const needsDump = failures.filter((f) => IS_REPAIR_SIGNATURE.test(f.signature));
+  const dump =
+    options.debug || needsDump.length > 0
+      ? await dumpRun(harness, [...devices.values()])
+      : undefined;
+  for (const failure of needsDump) {
+    failure.detail += ` DUMP ${dump!
+      .filter((line) => !SETUP_OP_LINE.test(line))
+      .join(' ¦ ')}`;
+  }
   return {
     steps: executed,
     failures,
@@ -529,9 +541,14 @@ export const runFuzz = async (options: FuzzOptions): Promise<FuzzResult> => {
       ...new Set(harness.server.rejections.map((r) => `${r.errorCode} ${r.actionType}`)),
     ].sort(),
     ms: Math.round(performance.now() - started),
-    ...(options.debug ? { dump: await dumpRun(harness, [...devices.values()]) } : {}),
+    ...(options.debug ? { dump } : {}),
   };
 };
+
+/** Failures whose detail gets the run's dump: a REPAIR op or a failed validation. */
+export const IS_REPAIR_SIGNATURE = /REPAIR|^(restart-)?validation:/;
+/** Dump lines of device A's setup ops (clock A only, counters 1-9). */
+const SETUP_OP_LINE = /\{"fuzzDevA":[1-9]\}/;
 
 const entityOfOp = (op: {
   entityType: string;
@@ -571,10 +588,18 @@ const dumpRun = async (
       TestBed.inject(OperationLogStoreService).getOpsAfterSeq(0),
     );
     for (const { seq, op, source, syncedAt, rejectedAt } of entries) {
+      // A full-state payload is the whole state; a REPAIR's summary says what
+      // validation found and repaired.
+      const payload =
+        op.opType === 'REPAIR'
+          ? `repairSummary=${JSON.stringify(
+              (op.payload as { repairSummary?: unknown } | null)?.repairSummary,
+            )?.slice(0, 600)}`
+          : shortJson(op.payload);
       lines.push(
         `${device.name} ${seq} ${source} ${op.clientId} ${op.actionType} ${entityOfOp(op)} ` +
           `${rejectedAt ? 'REJECTED' : syncedAt ? 'synced' : 'PENDING'} ` +
-          `${JSON.stringify(op.vectorClock)} ${shortJson(op.payload)}`,
+          `${JSON.stringify(op.vectorClock)} ${payload}`,
       );
     }
   }
