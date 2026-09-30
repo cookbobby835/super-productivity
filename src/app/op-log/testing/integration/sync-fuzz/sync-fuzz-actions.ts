@@ -200,12 +200,25 @@ export const executeIntent = async (
       const [, id, duration] = intent;
       const t = task(id);
       if (!t) return undefined;
-      // TaskService tick + _flushAccumulatedTimeSpent: local add, then the
-      // persistent task delta and the touched contexts' session data. The
-      // first tick of an unscheduled task also plans it for today
-      // (TaskRelatedModelEffects.autoAddTodayTagOnTracking, on by default;
-      // replicated here because its distinctUntilChanged memory would be
-      // shared between devices).
+      // Starting and tracking a task, as the app does it:
+      // - setCurrentTask reopens a done task: TaskInternalEffects
+      //   .reopenStartedDoneTask$ emits this updateTask as its own op, before
+      //   any tick (#9904);
+      // - it also plans an unscheduled task for today
+      //   (planStartedTaskForToday$, on by default via
+      //   isAutoAddWorkedOnToToday). Its Today-membership and parent checks
+      //   never skip a task here: membership comes from dueDay/dueWithTime,
+      //   and there are no subtasks. The tick's autoAddTodayTagOnTracking
+      //   then finds the task planned;
+      // - TaskService's tick and _flushAccumulatedTimeSpent: the local add
+      //   (not an op, so its place in the batch changes no op), then the
+      //   persistent task delta and the touched contexts' session data.
+      // run() dispatches one action at a time, so each is its own op.
+      if (t.isDone) {
+        await run(
+          TaskSharedActions.updateTask({ task: { id, changes: { isDone: false } } }),
+        );
+      }
       await run(
         TimeTrackingActions.addTimeSpent({
           task: t,
@@ -237,7 +250,7 @@ export const executeIntent = async (
           await run(syncTimeTracking({ contextType, contextId, date: day, data }));
         }
       }
-      return [];
+      return t.isDone ? [{ entity: `task:${id}`, field: 'isDone', value: false }] : [];
     }
     case 'deleteTask': {
       const [, id] = intent;

@@ -140,20 +140,23 @@ import {
  * - the in-memory service state listed in DEVICE_FIELDS.
  * Every other field of an instantiated app service must be listed in
  * SHARED_FIELDS with the reason it may be shared; the harness checks this
- * after every device turn and throws on an unlisted field. Module-level state
- * is outside that check: the capture meta-reducer's deferred-action buffer is
- * drained at every step boundary, and undo-task-delete.meta-reducer.ts keeps
- * the last local task delete for undo, which the fuzz never runs.
+ * after every device turn and throws on an unlisted field. The check counts
+ * functions, and Observables other than the Subjects that keep a value
+ * (BehaviorSubject, ReplaySubject, AsyncSubject), as stateless, so it misses
+ * state held in a `shareReplay` stream or a memoizing closure. Module-level
+ * state is outside that check: the capture meta-reducer's deferred-action
+ * buffer is drained at every step boundary, and undo-task-delete.meta-reducer.ts
+ * keeps the last local task delete for undo, which the fuzz never runs.
  *
  * Known gaps against the app (SyncWrapperService._syncBody and the effects):
  * - no provider-switch detection, lastSyncedProviderId, WebSocket or
  *   immediate upload (stubbed), and no UI sync status;
- * - the track intent copies the auto-add-to-Today effect's dueDay/dueWithTime
- *   filter, but not its selectTodayTaskIds check (redundant here: Today
- *   membership comes from dueDay/dueWithTime) or its distinctUntilChanged
- *   memory. So the fuzz re-plans a task that a remote change unplanned
- *   between two tracking sessions, where the app would not if no other task
- *   was tracked in between.
+ * - the track intent copies what starting a task does (TaskInternalEffects
+ *   .reopenStartedDoneTask$ and planStartedTaskForToday$) and the tick flush,
+ *   as one session that no sync interrupts. So it never needs
+ *   autoAddTodayTagOnTracking, which re-plans a task that a remote change
+ *   unplanned mid-session (once per task in a row, by its
+ *   distinctUntilChanged memory).
  */
 
 const FUZZ_SET_STATE = '[SyncFuzz] Set device state';

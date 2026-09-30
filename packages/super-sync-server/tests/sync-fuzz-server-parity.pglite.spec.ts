@@ -32,9 +32,11 @@ import * as port from '../../../src/app/op-log/testing/integration/sync-fuzz/fak
  * - OperationUploadService.processOperation on PGlite against the port's
  *   uploadOps, per op: accepted or not, error code, existingClock, serverSeq
  *   and the stored row.
- * The piggyback and download rules are asserted on the port alone; the port
- * header lists what is not checked. A server change that alters these rules
- * fails here until the port follows.
+ * The piggyback, and the download's client exclusion, `hasMore` probe and gap
+ * cases, are asserted on the port alone: the route handler and the download
+ * service read through the global Prisma client. The port header lists what
+ * is not checked. A server change to the rules compared with the real code
+ * fails here until the port follows; a change to the port-only rules does not.
  */
 
 const USER_ID = 1;
@@ -687,7 +689,7 @@ describe('sync fuzz SuperSync port: parity with the real server rules', () => {
 
   // Asserted on the port only: the route handler and the download service
   // read through the global Prisma client, so they are not run here.
-  it("piggybacks other clients' ops, never the uploader's own (sync.routes.ops-handler.ts)", () => {
+  it("piggybacks and downloads other clients' ops, and flags gaps (sync.routes*.ts)", () => {
     const server = new port.FakeSuperSyncServer(() => 5_000);
     const op = (
       id: string,
@@ -717,10 +719,19 @@ describe('sync fuzz SuperSync port: parity with the real server rules', () => {
     const download = server.downloadOps(0, 'cB', 1);
     expect(download.ops.map((o) => o.op.id)).toEqual(['a1']);
     expect(download.hasMore).toBe(true);
-    expect(server.downloadOps(1, undefined, 10).ops.map((o) => o.op.id)).toEqual([
-      'b1',
-      'a2',
-    ]);
+    expect(server.downloadOps(0, 'cA', 10).ops.map((o) => o.op.id)).toEqual(['b1']);
+    const all = server.downloadOps(1, undefined, 10);
+    expect(all.ops.map((o) => o.op.id)).toEqual(['b1', 'a2']);
+    expect(all.gapDetected).toBeUndefined();
+
+    // The gap cases of getOpsSinceWithSeq: a cursor ahead of the server, then,
+    // with rows gone as if pruned, a hole in the returned ops and a cursor
+    // behind the oldest kept op.
+    expect(server.downloadOps(5, 'cB', 10).gapDetected).toBe(true);
+    server.rows.splice(1, 1); // seq 2
+    expect(server.downloadOps(1, undefined, 10).gapDetected).toBe(true);
+    server.rows.splice(0, 1); // seq 1
+    expect(server.downloadOps(1, 'cB', 10).gapDetected).toBe(true);
   });
 
   it('uses the server error codes and clock-drift window', () => {

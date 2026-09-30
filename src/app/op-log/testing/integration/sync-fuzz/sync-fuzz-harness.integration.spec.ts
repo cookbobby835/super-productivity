@@ -7,7 +7,12 @@ import { EMPTY_SIMPLE_COUNTER } from '../../../../features/simple-counter/simple
 import { TaskSharedActions } from '../../../../root-store/meta/task-shared.actions';
 import { VectorClock } from '../../../core/operation.types';
 import { OperationLogStoreService } from '../../../persistence/operation-log-store.service';
-import { DeviceView, generateIntent, isUiPossible } from './sync-fuzz-actions';
+import {
+  DeviceView,
+  executeIntent,
+  generateIntent,
+  isUiPossible,
+} from './sync-fuzz-actions';
 import { FuzzDevice, SyncFuzzHarness } from './sync-fuzz-harness';
 import { comparable, createRandom, runFuzz } from './sync-fuzz-runner';
 
@@ -116,6 +121,27 @@ describe('SyncFuzzHarness: two devices on one injector', () => {
     await expectAsync(harness.as(a, async () => undefined)).toBeRejectedWithError(
       /stale harness/,
     );
+  }, 60_000);
+
+  it('reopens a done task that a device tracks, as starting it does in the app', async () => {
+    await harness.as(a, async () => {
+      await harness.dispatch(addTask('t1', 'task'));
+      await executeIntent(harness, ['doneTask', 't1', true]);
+      await executeIntent(harness, ['track', 't1', 2000]);
+    });
+    expect(await harness.sync(a)).toBe(true);
+    expect(await harness.sync(b)).toBe(true);
+    for (const device of [a, b]) {
+      const t1 = await harness.as(device, async () => {
+        const tasks = (await harness.state())['tasks'] as {
+          entities: Record<string, Task>;
+        };
+        return tasks.entities['t1'];
+      });
+      expect({ isDone: t1?.isDone, timeSpent: t1?.timeSpent })
+        .withContext(device.name)
+        .toEqual({ isDone: false, timeSpent: 2000 });
+    }
   }, 60_000);
 });
 

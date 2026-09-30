@@ -39,8 +39,10 @@ import type {
  * - the upload route's piggyback (sync.routes.ops-handler.ts): the ops since
  *   `lastKnownServerSeq`, without the uploader's own;
  * - the download (sync.routes.ts, operation-download.service.ts): without the
- *   requesting client's ops, the `limit + 1` probe for `hasMore`, and gap
- *   detection.
+ *   requesting client's ops, the `limit + 1` probe for `hasMore`, and the gap
+ *   cases (a cursor ahead of the server, a hole in the returned ops, a cursor
+ *   behind the oldest kept op). The fuzz reaches no gap: its cursors come
+ *   from the server, and the port never prunes.
  *
  * Not modeled, because the fuzz never reaches it: full-state ops and snapshot
  * uploads (both throw FuzzUnsupportedTransportError), the state-replacement
