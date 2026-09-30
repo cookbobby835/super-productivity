@@ -63,7 +63,7 @@ import { INBOX_PROJECT } from '../../features/project/project.const';
 import { TODAY_TAG, SYSTEM_TAG_IDS } from '../../features/tag/tag.const';
 import { OperationSyncCapable } from '../sync-providers/provider.interface';
 import {
-  selectConfigFeatureState,
+  CONFIG_FEATURE_NAME,
   selectSyncConfig,
 } from '../../features/config/store/global-config.reducer';
 import { GlobalConfigState } from '../../features/config/global-config.model';
@@ -5169,8 +5169,9 @@ describe('OperationLogSyncService', () => {
         appFeatures: { ...DEFAULT_GLOBAL_CONFIG.appFeatures, isBoardsEnabled: true },
         misc: { ...DEFAULT_GLOBAL_CONFIG.misc, isMinimizeToTray: true },
       };
-      mockStore.overrideSelector(selectConfigFeatureState, liveConfig);
-      mockStore.refreshState();
+      // State, not overrideSelector: an override sticks to the shared memoized
+      // selector and leaks into later specs that derive from it.
+      mockStore.setState({ [CONFIG_FEATURE_NAME]: liveConfig });
       const dispatchSpy = spyOn(mockStore, 'dispatch').and.callThrough();
       downloadServiceSpy.downloadRemoteOps.and.resolveTo({
         newOps: [makeRemoteOp()],
