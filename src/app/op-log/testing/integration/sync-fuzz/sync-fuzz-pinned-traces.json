@@ -205,7 +205,7 @@
   },
   {
     "class": "whole-entity-lww-drops-fields",
-    "ref": "#10379",
+    "ref": "fixed by the field patch PR (regression pin)",
     "name": "done status is lost when both devices also rename the task",
     "steps": [
       {
@@ -221,13 +221,12 @@
         "a": ["renameTask", "t2", "C28"]
       }
     ],
-    "primary": "field-reverted:task.isDone",
-    "signatures": ["field-reverted:task.isDone"],
-    "rejections": ["CONFLICT_CONCURRENT [TASK] LWW Update"]
+    "signatures": [],
+    "rejections": []
   },
   {
     "class": "whole-entity-lww-drops-fields",
-    "ref": "#10379",
+    "ref": "fixed by the field patch PR (regression pin)",
     "name": "tracked time is lost to a later concurrent rename",
     "steps": [
       {
@@ -248,8 +247,7 @@
         "a": ["renameTask", "t2", "C29"]
       }
     ],
-    "primary": "time-loss:task",
-    "signatures": ["time-loss:task"],
+    "signatures": [],
     "rejections": []
   },
   {

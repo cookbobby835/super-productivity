@@ -1,7 +1,9 @@
 # Design note: LWW resolutions that carry only the fields that must win
 
-**Status:** decided 2026-09-30 (see [Outcome](#outcome)). Option A is not
-implemented. Tracker: #10393, queue item 1. Findings: #10382.
+**Status:** decided 2026-09-30 (see [Outcome](#outcome)). Option A's PR 1 is
+implemented (see [Implementation](#implementation-pr-1)); "How it works today"
+below describes the code before it. Tracker: #10393, queue item 1. Findings:
+#10382.
 
 ## Problem
 
@@ -299,3 +301,66 @@ Decided by @johannesjo on 2026-09-30 ([#10393](https://github.com/super-producti
 5. **Resolution ops as input:** no; the no-re-merge contract stays.
 6. **Opaque ops:** stay on whole-entity LWW.
 7. **Time on a remote win:** local-win direction only, for now.
+
+## Implementation (PR 1)
+
+[`conflict-field-patch.util.ts`](../../src/app/op-log/sync/conflict-field-patch.util.ts)
+holds the rules; `ConflictResolutionService._tryCreateFieldPatch` builds the op.
+
+- **Overlap:** every update-vs-update conflict of a TASK, PROJECT, TAG or
+  SIMPLE_COUNTER whose ops are readable resolves as one `'patch'`. A field
+  both sides wrote takes the planner's winner's value, noise fields included
+  (`synthesizeMergedChanges`); the old `(timestamp, localOps[0].clientId)`
+  noise tiebreak is gone.
+- **Aggregation:** an entity's conflicts (one per remote op) resolve together
+  as one patch of both full sides (`aggregateEntityConflict`).
+- **Time:** a local `syncTimeSpent` delta is neither in the patch nor
+  rejected. It stays pending and is rebased in place past the remote sides,
+  together with the patch after it (`rebaseKeptTimeDeltas`). A remote delta,
+  `removeTimeSpent`, or a delta beside an absolute time write keeps the
+  whole-entity path.
+- **Clock:** the patch also dominates the batch's commuting single-entity ops
+  on its entity (e.g. a third client's delta), or the server rejects it as
+  concurrent. It carries none of their fields.
+- **Superseded ops:** `SupersededOperationResolverService` re-emits a rejected
+  group of readable single-entity edits as a `'patch'` of the fields they
+  wrote, read from current state. LWW rows, deltas and opaque ops keep the
+  whole-entity snapshot (decision 5).
+- **No echo:** a remote win emits no patch when the local side wrote nothing
+  the remote side did not (unless it keeps a delta), and a no-pending crossing
+  (#9073) that the remote side won emits nothing; the winner's device
+  patches. An echo is a new opaque row that can beat another device's pending
+  edit.
+- **Done toggles:** a patch carries the `doneOn` the task reducer derives
+  (the op's timestamp, or a clear when undone), as the op converter does for
+  replay; otherwise live state and a restart differ.
+- **A later round:** when pending readable edits lose to a remote LWW row (a
+  patch or snapshot another device resolved), the local fields that still
+  hold their values after the row applied are re-emitted as a patch, in the
+  same transaction as their rejection (`survivingLocalFields`). The row's
+  payload is not read (decision 5); a replace row used to hide this case by
+  overwriting the fields everywhere.
+- **Content banner:** a patch reports a content field only where both sides
+  wrote it (`findPatchContentConflicts`).
+
+**Residuals:**
+
+- **Decision 2:** a device that applied a concurrent delete recreates the
+  entity from the patch with defaults outside it. It now also covers
+  overlapping resolutions.
+- **Decision 3:** a v18.15.0–v18.21.x receiver ignores a patch's clears. An
+  overlapping resolution whose patch would clear `reminderId`, `remindAt`,
+  `dueWithTime` or `deadlineRemindAt` keeps the whole-entity path, so that
+  shape keeps #10379's loss. Disjoint merges patched clears before and still
+  do.
+- **Derived fields:** apart from `doneOn`, a patch sets fields, not their
+  reducer side effects (e.g. a subtask estimate's parent total). This
+  predates PR 1 for disjoint merges and now covers overlapping ones.
+- **A time delta that loses to a resolution row** is rejected, as on master
+  (#10408 keeps such deltas only against readable winners). A replace row
+  wiped the device's time too; a patch row leaves it there, so the time is
+  still lost for the other devices but the losing device diverges.
+- **Opaque ops, NOTE, deletes and archives** keep whole-entity LWW, so the
+  habit, note and task-tracking pins of #10379 and #10260 stay.
+- **Released resolvers:** a v19.1.0 device that resolves still emits replace
+  snapshots; patches take over as clients update.
