@@ -9,11 +9,14 @@ import {
   isSameIncomingOperation,
   resolveConflictForExistingOp,
 } from '../src/sync/conflict';
+import { OperationUploadService } from '../src/sync/services/operation-upload.service';
+import { ValidationService } from '../src/sync/services/validation.service';
 import {
   DEFAULT_SYNC_CONFIG,
   limitVectorClockSize,
   SYNC_ERROR_CODES,
   type Operation,
+  type UploadResult,
   type VectorClock,
 } from '../src/sync/sync.types';
 import * as port from '../../../src/app/op-log/testing/integration/sync-fuzz/fake-super-sync-server';
@@ -21,16 +24,24 @@ import * as port from '../../../src/app/op-log/testing/integration/sync-fuzz/fak
 /**
  * Parity for the in-memory SuperSync port the app's sync fuzz harness runs
  * against (src/app/op-log/testing/integration/sync-fuzz/). Seeded random
- * operations go through the real conflict functions (detectConflict on PGlite,
- * with the production SQL) and through the port; every verdict must match.
- * A server change that alters conflict, duplicate or entity-id rules fails
- * here until the port follows.
+ * operations go through the real server code and through the port; every
+ * verdict must match:
+ * - conflict.ts: detectConflict on PGlite, with the production SQL, and the
+ *   pure entity-id, duplicate and retry helpers;
+ * - ValidationService.validateOp against the port's validateOpSubset;
+ * - OperationUploadService.processOperation on PGlite against the port's
+ *   uploadOps, per op: accepted or not, error code, existingClock, serverSeq
+ *   and the stored row.
+ * The piggyback and download rules are asserted on the port alone; the port
+ * header lists what is not checked. A server change that alters these rules
+ * fails here until the port follows.
  */
 
 const USER_ID = 1;
 const DELTA = '[TimeTracking] Sync time spent';
 const CLIENTS = ['cA', 'cB', 'cC', 'cD'];
 const ENTITY_IDS = ['e1', 'e2', 'e3', 'tasks', 'misc'];
+const REGULAR_OP_TYPES = ['UPD', 'CRT', 'DEL', 'MOV'] as const;
 
 const createRandom = (seed: number): (() => number) => {
   let a = seed;
@@ -42,8 +53,13 @@ const createRandom = (seed: number): (() => number) => {
   };
 };
 
+const pickFrom =
+  (random: () => number) =>
+  <T>(items: readonly T[]): T =>
+    items[Math.floor(random() * items.length)];
+
 const randomOp = (random: () => number, id: string): Operation => {
-  const pick = <T>(items: readonly T[]): T => items[Math.floor(random() * items.length)];
+  const pick = pickFrom(random);
   const clock: VectorClock = {};
   for (const client of CLIENTS) {
     if (random() < 0.6) clock[client] = 1 + Math.floor(random() * 3);
@@ -53,7 +69,7 @@ const randomOp = (random: () => number, id: string): Operation => {
   const multi = random() < 0.25;
   const entityType = random() < 0.2 ? 'GLOBAL_CONFIG' : pick(['TASK', 'NOTE']);
   const entityId = pick(ENTITY_IDS);
-  const opType = random() < 0.05 ? 'SYNC_IMPORT' : pick(['UPD', 'CRT', 'DEL', 'MOV']);
+  const opType = random() < 0.05 ? 'SYNC_IMPORT' : pick(REGULAR_OP_TYPES);
   return {
     id,
     clientId,
@@ -71,13 +87,69 @@ const randomOp = (random: () => number, id: string): Operation => {
   };
 };
 
-/** Renders the Prisma calls conflict.ts makes as SQL on PGlite. */
-const createTransaction = (db: PGlite): Prisma.TransactionClient => {
+/**
+ * One field of `op` broken the way a malformed upload could be, or `op` as is.
+ * Without `isPayloadVisible` the payload stays: past the E2EE gate every
+ * payload is a ciphertext string.
+ */
+const withInvalidField = (
+  random: () => number,
+  op: Operation,
+  isPayloadVisible = true,
+): Operation => {
+  const roll = random();
+  if (roll < 0.05) return { ...op, entityId: '' };
+  if (roll < 0.08) return { ...op, entityId: '   ' };
+  if (roll < 0.12) return { ...op, entityId: undefined };
+  if (roll < 0.15) return { ...op, entityIds: ['e1', ''] };
+  if (roll < 0.27 && isPayloadVisible) {
+    return { ...op, payload: pickFrom(random)([undefined, null, [], 42]) };
+  }
+  if (roll < 0.3) return { ...op, schemaVersion: pickFrom(random)([0, 101, 1.5]) };
+  if (roll < 0.33) return { ...op, timestamp: pickFrom(random)([1.5, Number.NaN]) };
+  return op;
+};
+
+/** A task-time delta payload, valid or broken in one of the ways validateOp checks. */
+const deltaPayload = (random: () => number, entityId: string | undefined): unknown => {
+  const valid = { taskId: entityId, date: '2026-09-30', duration: 1_000 };
+  const variant = pickFrom(random)([
+    valid,
+    { actionPayload: valid },
+    { ...valid, taskId: 'other' },
+    { ...valid, date: '2026-02-30' },
+    { ...valid, date: '30.09.2026' },
+    { ...valid, duration: -1 },
+    { ...valid, duration: '5' },
+    { ...valid, duration: Number.NaN },
+    null,
+  ]);
+  return variant;
+};
+
+/** Renders the Prisma calls the real conflict and upload code makes as SQL on PGlite. */
+const createTransaction = (
+  db: PGlite,
+  syncState: { lastSeq: number },
+): Prisma.TransactionClient => {
   const columns: Record<string, string> = {
-    actionType: 'action_type AS "actionType"',
+    id: 'id',
+    userId: 'user_id AS "userId"',
     clientId: 'client_id AS "clientId"',
+    actionType: 'action_type AS "actionType"',
+    opType: 'op_type AS "opType"',
+    entityType: 'entity_type AS "entityType"',
+    entityId: 'entity_id AS "entityId"',
+    entityIds: 'entity_ids AS "entityIds"',
+    payload: 'payload',
     vectorClock: 'vector_clock AS "vectorClock"',
     serverSeq: 'server_seq AS "serverSeq"',
+    schemaVersion: 'schema_version AS "schemaVersion"',
+    clientTimestamp: 'client_timestamp AS "clientTimestamp"',
+    receivedAt: 'received_at AS "receivedAt"',
+    isPayloadEncrypted: 'is_payload_encrypted AS "isPayloadEncrypted"',
+    syncImportReason: 'sync_import_reason AS "syncImportReason"',
+    repairBaseServerSeq: 'repair_base_server_seq AS "repairBaseServerSeq"',
   };
   const selectSql = (select: Record<string, boolean>): string =>
     Object.keys(select)
@@ -92,6 +164,26 @@ const createTransaction = (db: PGlite): Prisma.TransactionClient => {
     entityType: string;
     entityId: string;
     schemaVersion?: { lt: number };
+  }
+  interface CreateRow {
+    id: string;
+    userId: number;
+    clientId: string;
+    serverSeq: number;
+    actionType: string;
+    opType: string;
+    entityType: string;
+    entityId: string | null;
+    entityIds: string[];
+    payload: unknown;
+    payloadBytes: bigint;
+    vectorClock: unknown;
+    schemaVersion: number;
+    clientTimestamp: bigint;
+    receivedAt: bigint;
+    isPayloadEncrypted: boolean;
+    syncImportReason: string | null;
+    repairBaseServerSeq: number | null;
   }
   const tx = {
     operation: {
@@ -109,16 +201,71 @@ const createTransaction = (db: PGlite): Prisma.TransactionClient => {
         return rows.rows[0] ?? null;
       },
       findUnique: async (args: {
-        where: { userId_serverSeq: { userId: number; serverSeq: number } };
+        where:
+          | { id: string }
+          | { userId_serverSeq: { userId: number; serverSeq: number } };
         select: Record<string, boolean>;
       }) => {
-        const { userId, serverSeq } = args.where.userId_serverSeq;
-        const rows = await db.query<Record<string, unknown>>(
-          `SELECT ${selectSql(args.select)} FROM operations
-             WHERE user_id = $1 AND server_seq = $2`,
-          [userId, serverSeq],
-        );
+        const rows =
+          'id' in args.where
+            ? await db.query<Record<string, unknown>>(
+                `SELECT ${selectSql(args.select)} FROM operations WHERE id = $1`,
+                [args.where.id],
+              )
+            : await db.query<Record<string, unknown>>(
+                `SELECT ${selectSql(args.select)} FROM operations
+                   WHERE user_id = $1 AND server_seq = $2`,
+                [
+                  args.where.userId_serverSeq.userId,
+                  args.where.userId_serverSeq.serverSeq,
+                ],
+              );
         return rows.rows[0] ?? null;
+      },
+      createMany: async (args: { data: CreateRow[]; skipDuplicates?: boolean }) => {
+        let count = 0;
+        for (const row of args.data) {
+          const result = await db.query(
+            `INSERT INTO operations (id, user_id, client_id, server_seq, action_type,
+               op_type, entity_type, entity_id, entity_ids, payload, payload_bytes,
+               vector_clock, schema_version, client_timestamp, received_at,
+               is_payload_encrypted, sync_import_reason, repair_base_server_seq)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+               $16, $17, $18)
+             ${args.skipDuplicates ? 'ON CONFLICT (id) DO NOTHING' : ''}`,
+            [
+              row.id,
+              row.userId,
+              row.clientId,
+              row.serverSeq,
+              row.actionType,
+              row.opType,
+              row.entityType,
+              row.entityId,
+              row.entityIds,
+              JSON.stringify(row.payload),
+              String(row.payloadBytes),
+              JSON.stringify(row.vectorClock),
+              row.schemaVersion,
+              String(row.clientTimestamp),
+              String(row.receivedAt),
+              row.isPayloadEncrypted,
+              row.syncImportReason,
+              row.repairBaseServerSeq,
+            ],
+          );
+          count += result.affectedRows ?? 0;
+        }
+        return { count };
+      },
+    },
+    userSyncState: {
+      update: async (args: {
+        data: { lastSeq?: { increment?: number; decrement?: number } };
+      }) => {
+        syncState.lastSeq += args.data.lastSeq?.increment ?? 0;
+        syncState.lastSeq -= args.data.lastSeq?.decrement ?? 0;
+        return { ...syncState };
       },
     },
     $queryRaw: async (
@@ -132,14 +279,29 @@ const createTransaction = (db: PGlite): Prisma.TransactionClient => {
   return tx as unknown as Prisma.TransactionClient;
 };
 
+interface Verdict {
+  accepted: boolean;
+  serverSeq?: number;
+  errorCode?: string;
+  existingClock?: unknown;
+}
+
+/** The fields an upload result is compared on (the error text is free to differ). */
+const verdict = (result: Verdict): Record<string, unknown> => ({
+  accepted: result.accepted,
+  ...(result.serverSeq !== undefined ? { serverSeq: result.serverSeq } : {}),
+  ...(result.errorCode ? { errorCode: result.errorCode } : {}),
+  ...(result.existingClock ? { existingClock: result.existingClock } : {}),
+});
+
 describe('sync fuzz SuperSync port: parity with the real server rules', () => {
   let db: PGlite;
+  let syncState: { lastSeq: number };
   let tx: Prisma.TransactionClient;
 
   beforeAll(async () => {
     db = new PGlite();
     await db.waitReady;
-    tx = createTransaction(db);
   });
 
   afterAll(async () => {
@@ -147,6 +309,8 @@ describe('sync fuzz SuperSync port: parity with the real server rules', () => {
   });
 
   beforeEach(async () => {
+    syncState = { lastSeq: 0 };
+    tx = createTransaction(db, syncState);
     await db.exec(`
       DROP TABLE IF EXISTS operations;
       CREATE TABLE operations (
@@ -155,11 +319,19 @@ describe('sync fuzz SuperSync port: parity with the real server rules', () => {
         client_id text NOT NULL,
         server_seq integer NOT NULL,
         action_type text NOT NULL,
+        op_type text NOT NULL DEFAULT 'UPD',
         entity_type text NOT NULL,
         entity_id text,
         entity_ids text[] NOT NULL DEFAULT '{}',
+        payload jsonb,
+        payload_bytes bigint NOT NULL DEFAULT 0,
         vector_clock jsonb NOT NULL,
-        schema_version integer NOT NULL
+        schema_version integer NOT NULL,
+        client_timestamp bigint NOT NULL DEFAULT 0,
+        received_at bigint NOT NULL DEFAULT 0,
+        is_payload_encrypted boolean NOT NULL DEFAULT false,
+        sync_import_reason text,
+        repair_base_server_seq integer
       );
       CREATE INDEX operations_entity_ids_gin ON operations USING GIN (entity_ids);
     `);
@@ -245,6 +417,200 @@ describe('sync fuzz SuperSync port: parity with the real server rules', () => {
     });
   }
 
+  /** The real verdicts the upload seeds reached, for the coverage check after them. */
+  const reached = new Set<string>();
+
+  for (let seed = 1; seed <= 8; seed++) {
+    it(`uploads get the real per-op verdicts and stored rows (seed ${seed})`, async () => {
+      // The real server only accepts E2EE uploads, so every op is encrypted:
+      // an opaque string payload that neither side can read.
+      const random = createRandom(100 + seed);
+      const pick = pickFrom(random);
+      const validation = new ValidationService(DEFAULT_SYNC_CONFIG);
+      const uploadService = new OperationUploadService(validation, DEFAULT_SYNC_CONFIG);
+      let now = 50_000;
+      const server = new port.FakeSuperSyncServer(() => now);
+      const sent: Operation[] = [];
+      for (let request = 0; request < 40; request++) {
+        now += Math.floor(random() * 40_000);
+        const clientId = pick(CLIENTS);
+        const ops: Operation[] = [];
+        for (let i = 0; i < 1 + Math.floor(random() * 3); i++) {
+          const roll = random();
+          if (roll < 0.15 && sent.length) {
+            // A retry of an earlier upload: exact, or with one field changed.
+            const earlier = pick(sent);
+            const change = random();
+            ops.push(
+              change < 0.5
+                ? { ...earlier }
+                : change < 0.7
+                  ? { ...earlier, payload: `enc:${request}` }
+                  : change < 0.85
+                    ? { ...earlier, vectorClock: { ...earlier.vectorClock, cD: 9 } }
+                    : { ...earlier, timestamp: earlier.timestamp + 1 },
+            );
+          } else if (roll < 0.22 && ops.length) {
+            ops.push({ ...ops[ops.length - 1] }); // the same id twice in one request
+          } else {
+            const base = randomOp(random, `u-${seed}-${request}-${i}`);
+            const op: Operation = withInvalidField(
+              random,
+              {
+                ...base,
+                clientId: random() < 0.9 ? clientId : base.clientId,
+                vectorClock: {
+                  ...base.vectorClock,
+                  [clientId]: base.vectorClock[clientId] ?? 1,
+                },
+                opType: pick(REGULAR_OP_TYPES),
+                payload: `enc:${Math.floor(random() * 3)}`,
+                isPayloadEncrypted: true,
+                // Some from a client clock far ahead, which the server clamps.
+                timestamp:
+                  random() < 0.1 ? now + 200_000 : now - Math.floor(random() * 1_000),
+              },
+              false,
+            );
+            ops.push(op);
+          }
+        }
+        sent.push(...ops);
+
+        const first = new Map<string, { op: Operation; originalTimestamp: number }>();
+        const real: UploadResult[] = [];
+        for (const op of structuredClone(ops)) {
+          // The per-op loop of SyncService.uploadOps.
+          const firstRequestOperation = first.get(op.id);
+          const valid = validation.validateOp(op, clientId);
+          if (!firstRequestOperation) {
+            first.set(op.id, { op: { ...op }, originalTimestamp: op.timestamp });
+          }
+          const { result } = await uploadService.processOperation(
+            USER_ID,
+            clientId,
+            op,
+            now,
+            tx,
+            valid,
+            false,
+            firstRequestOperation,
+          );
+          real.push(result);
+          reached.add(result.accepted ? 'accepted' : `${result.errorCode}`);
+          if (result.existingClock) reached.add(`${result.errorCode} existingClock`);
+        }
+        const ported = server.uploadOps(structuredClone(ops), clientId).results;
+        expect(
+          ported.map(verdict),
+          `request ${request} from ${clientId}: ${JSON.stringify(ops)}`,
+        ).toEqual(real.map(verdict));
+      }
+      const rows = await db.query<{
+        id: string;
+        serverSeq: number;
+        clientTimestamp: string;
+        vectorClock: VectorClock;
+        entityIds: string[];
+      }>(
+        `SELECT id, server_seq AS "serverSeq", client_timestamp::text AS "clientTimestamp",
+           vector_clock AS "vectorClock", entity_ids AS "entityIds"
+         FROM operations ORDER BY server_seq`,
+      );
+      expect(
+        server.rows.map((row) => ({
+          id: row.op.id,
+          serverSeq: row.serverSeq,
+          clientTimestamp: String(row.clientTimestamp),
+          vectorClock: row.op.vectorClock,
+          entityIds: row.op.entityIds,
+        })),
+      ).toEqual(rows.rows);
+    });
+  }
+
+  it('the upload seeds reach every verdict the port models (runs after them)', () => {
+    expect([...reached].sort()).toEqual([
+      'CONFLICT_CONCURRENT',
+      'CONFLICT_CONCURRENT existingClock',
+      'CONFLICT_SUPERSEDED',
+      'CONFLICT_SUPERSEDED existingClock',
+      'DUPLICATE_OPERATION',
+      'INVALID_CLIENT_ID',
+      'INVALID_ENTITY_ID',
+      'INVALID_OP_ID',
+      'INVALID_SCHEMA_VERSION',
+      'INVALID_TIMESTAMP',
+      'MISSING_ENTITY_ID',
+      'accepted',
+    ]);
+  });
+
+  it('decides without reading payloads, as the E2EE-only server must', () => {
+    // Two ports get the same uploads; one gets arbitrary payloads, and retries
+    // with payloads other than the first send's.
+    const random = createRandom(31);
+    const pick = pickFrom(random);
+    const payloads: unknown[] = [undefined, null, 42, [], 'enc:1', { v: 1 }, { x: [2] }];
+    for (let run = 0; run < 10; run++) {
+      const plain = new port.FakeSuperSyncServer(() => 5_000);
+      const varied = new port.FakeSuperSyncServer(() => 5_000);
+      const sent: Operation[] = [];
+      for (let request = 0; request < 30; request++) {
+        const clientId = pick(CLIENTS);
+        const ops = [0, 1, 2].map((i): Operation => {
+          if (sent.length && random() < 0.25) return { ...pick(sent) };
+          const base = randomOp(random, `b-${run}-${request}-${i}`);
+          return {
+            ...base,
+            clientId,
+            opType: pick(REGULAR_OP_TYPES),
+            vectorClock: {
+              ...base.vectorClock,
+              [clientId]: base.vectorClock[clientId] ?? 1,
+            },
+          };
+        });
+        sent.push(...ops);
+        const expected = plain.uploadOps(ops, clientId).results.map(verdict);
+        const actual = varied
+          .uploadOps(
+            ops.map((op) => ({ ...op, payload: pick(payloads) })),
+            clientId,
+          )
+          .results.map(verdict);
+        expect(actual, `run ${run} request ${request}: ${JSON.stringify(ops)}`).toEqual(
+          expected,
+        );
+      }
+    }
+  });
+
+  it('validateOpSubset agrees with ValidationService.validateOp', () => {
+    const random = createRandom(7);
+    const validation = new ValidationService(DEFAULT_SYNC_CONFIG);
+    for (let i = 0; i < 2_000; i++) {
+      const base = randomOp(random, `v-${i}`);
+      const op = withInvalidField(random, {
+        ...base,
+        payload:
+          base.actionType === DELTA ? deltaPayload(random, base.entityId) : base.payload,
+        ...(random() < 0.3 ? { isPayloadEncrypted: true } : {}),
+        ...(random() < 0.1 ? { payload: 'enc:1' } : {}),
+      });
+      const clientId = random() < 0.1 ? 'cX' : op.clientId;
+      const real = validation.validateOp(structuredClone(op), clientId);
+      const ported = port.validateOpSubset(structuredClone(op), clientId);
+      expect(
+        { valid: !ported, errorCode: ported?.errorCode },
+        `op ${i}: ${JSON.stringify(op)} as ${clientId}`,
+      ).toEqual({
+        valid: real.valid,
+        errorCode: real.valid ? undefined : real.errorCode,
+      });
+    }
+  });
+
   it('pure helpers agree on random operations', () => {
     const random = createRandom(99);
     // A retry of `op` with at most one field changed, or an unrelated op, so
@@ -319,17 +685,53 @@ describe('sync fuzz SuperSync port: parity with the real server rules', () => {
     }
   });
 
+  // Asserted on the port only: the route handler and the download service
+  // read through the global Prisma client, so they are not run here.
+  it("piggybacks other clients' ops, never the uploader's own (sync.routes.ops-handler.ts)", () => {
+    const server = new port.FakeSuperSyncServer(() => 5_000);
+    const op = (
+      id: string,
+      clientId: string,
+      entityId: string,
+      counter: number,
+    ): Operation => ({
+      id,
+      clientId,
+      actionType: '[Task] Update',
+      opType: 'UPD',
+      entityType: 'TASK',
+      entityId,
+      payload: 'enc:1',
+      isPayloadEncrypted: true,
+      vectorClock: { [clientId]: counter },
+      timestamp: 1_000,
+      schemaVersion: 2,
+    });
+    server.uploadOps([op('a1', 'cA', 'e1', 1)], 'cA');
+    server.uploadOps([op('b1', 'cB', 'e2', 1)], 'cB');
+    const response = server.uploadOps([op('a2', 'cA', 'e3', 2)], 'cA', 0);
+    expect(response.results.map((r) => r.accepted)).toEqual([true]);
+    expect(response.newOps?.map((o) => o.op.id)).toEqual(['b1']);
+    expect(response.latestSeq).toBe(3);
+
+    const download = server.downloadOps(0, 'cB', 1);
+    expect(download.ops.map((o) => o.op.id)).toEqual(['a1']);
+    expect(download.hasMore).toBe(true);
+    expect(server.downloadOps(1, undefined, 10).ops.map((o) => o.op.id)).toEqual([
+      'b1',
+      'a2',
+    ]);
+  });
+
   it('uses the server error codes and clock-drift window', () => {
     for (const code of [
       'CONFLICT_CONCURRENT',
       'CONFLICT_SUPERSEDED',
       'DUPLICATE_OPERATION',
       'INVALID_OP_ID',
-      'INTERNAL_ERROR',
     ]) {
       expect(SYNC_ERROR_CODES).toHaveProperty(code, code);
     }
     expect(DEFAULT_SYNC_CONFIG.maxClockDriftMs).toBe(60_000);
-    expect(port.STATE_REPLACEMENT_REQUIRED_ERROR).toBeTruthy();
   });
 });

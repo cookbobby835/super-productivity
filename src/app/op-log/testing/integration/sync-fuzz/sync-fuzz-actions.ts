@@ -129,14 +129,32 @@ const enabledHabitIds = (view: DeviceView): string[] =>
   view.habits.filter((h) => h.isEnabled).map((h) => h.id);
 
 /**
+ * Whether the UI offers the intent in this device state:
+ * - note.component.html shows the pin toggle for project notes only;
+ * - only enabled habits show a counter button.
+ * Other intents are always offered while their target exists.
+ */
+export const isUiPossible = (intent: Intent, view: DeviceView): boolean => {
+  if (intent[0] === 'editNote' && intent[2] === 'isPinnedToToday') {
+    return !!view.notes.find((n) => n.id === intent[1])?.projectId;
+  }
+  if (intent[0] === 'countHabit') {
+    return !!view.habits.find((h) => h.id === intent[1])?.isEnabled;
+  }
+  return true;
+};
+
+/**
  * Dispatches the intent on the current device. Returns the values written, or
- * undefined when the intent does not apply to this device's state.
+ * undefined when the intent does not apply to this device's state, including
+ * when the UI would not offer it there.
  */
 export const executeIntent = async (
   harness: SyncFuzzHarness,
   intent: Intent,
 ): Promise<FuzzWrite[] | undefined> => {
   const view = viewOf(await harness.state());
+  if (!isUiPossible(intent, view)) return undefined;
   const task = (id: string): Task | undefined => view.tasks.find((t) => t.id === id);
   const note = (id: string): Note | undefined => view.notes.find((n) => n.id === id);
   const habit = (id: string): SimpleCounter | undefined =>
@@ -412,7 +430,11 @@ export const generateIntent = (
         return ['addNote', nextId('n'), random() < 0.5 ? 'P' : 'T'];
       case 'editNote':
         if (n) {
-          const field = pick(['content', 'isPinnedToToday', 'isLock'] as const)!;
+          const field = pick(
+            n.projectId
+              ? (['content', 'isPinnedToToday', 'isLock'] as const)
+              : (['content', 'isLock'] as const),
+          )!;
           return ['editNote', n.id, field, field === 'content' ? label : !n[field]];
         }
         break;
@@ -430,9 +452,11 @@ export const generateIntent = (
             : ['editHabit', h.id, 'isEnabled', !h.isEnabled];
         }
         break;
-      case 'countHabit':
-        if (h) return ['countHabit', h.id];
+      case 'countHabit': {
+        const enabled = pick(view.habits.filter((x) => x.isEnabled));
+        if (enabled) return ['countHabit', enabled.id];
         break;
+      }
       case 'reorderHabits':
         return ['reorderHabits', index(), index()];
     }

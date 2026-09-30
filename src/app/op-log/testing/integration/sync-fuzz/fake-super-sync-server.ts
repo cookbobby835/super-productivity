@@ -4,7 +4,6 @@ import {
   // durable client clock.
   // eslint-disable-next-line no-restricted-imports
   limitVectorClockSize,
-  MAX_VECTOR_CLOCK_SIZE,
   VectorClock,
 } from '@sp/sync-core';
 import type {
@@ -20,25 +19,53 @@ import type {
 /**
  * In-memory SuperSync server for the sync fuzz harness.
  *
- * The decision logic is a PORT of packages/super-sync-server (conflict.ts,
- * services/operation-upload.service.ts, sync.service.ts uploadOps,
- * sync.routes.ops-handler.ts, services/operation-download.service.ts). It
- * cannot be imported into the Karma bundle: those modules pull in Prisma and a
- * node `fs` logger. packages/super-sync-server/tests/sync-fuzz-server-parity.pglite.spec.ts
- * runs this port against the real server functions (the conflict SQL on
- * PGlite) — keep both in step when the server changes.
+ * The decision logic is a PORT of packages/super-sync-server. It cannot be
+ * imported into the Karma bundle: those modules pull in Prisma and a node `fs`
+ * logger. This file must stay free of Angular imports so the server's vitest
+ * can load it.
  *
- * This file must stay free of Angular imports so the server's vitest can load it.
+ * Checked against the real server code by
+ * packages/super-sync-server/tests/sync-fuzz-server-parity.pglite.spec.ts:
+ * - conflict.ts: detectConflict (the production SQL, on PGlite) and the pure
+ *   entity-id, duplicate and in-request retry helpers;
+ * - validation.service.ts: ValidationService.validateOp against
+ *   validateOpSubset, on the op shapes the subset covers;
+ * - operation-upload.service.ts: OperationUploadService.processOperation (on
+ *   PGlite) against uploadOps, per op: accepted or not, error code,
+ *   existingClock and serverSeq, including in-request retries, stored
+ *   duplicates and the clock-drift clamp.
+ *
+ * Asserted on this port only, NOT checked against the real code:
+ * - the upload route's piggyback (sync.routes.ops-handler.ts): the ops since
+ *   `lastKnownServerSeq`, without the uploader's own;
+ * - the download (sync.routes.ts, operation-download.service.ts): without the
+ *   requesting client's ops, the `limit + 1` probe for `hasMore`, and gap
+ *   detection.
+ *
+ * Not modeled, because the fuzz never reaches it: full-state ops and snapshot
+ * uploads (both throw FuzzUnsupportedTransportError), the state-replacement
+ * fence, the download's snapshot skip and snapshot vector clock, clock pruning
+ * that protects a full-state author, quotas, rate limits, the request dedup
+ * cache, WebSocket notifications, and the validation rules outside the subset
+ * (op id, op type and entity type checks, clock sanitizing, payload size and
+ * depth, BATCH payloads).
+ *
+ * E2EE: the real server accepts only end-to-end encrypted uploads
+ * (violatesE2eeGate in sync.routes.payload.ts): every payload is a ciphertext
+ * string that it never reads. The fuzz uploads plaintext because it has no
+ * key, so every upload decision reads the op through `asOpaque`, which puts a
+ * ciphertext stand-in in place of the payload: validation passes the payload
+ * rules as for any gate-checked string, and the duplicate and retry checks
+ * skip payload equality as for two encrypted ops. The parity spec checks that
+ * no verdict changes with the payload. The helpers keep their plaintext
+ * branches only for parity with the real functions.
  */
 
 export const TASK_TIME_DELTA_ACTION_TYPE = '[TimeTracking] Sync time spent';
-export const CONFLICT_DETECTION_ENTITY_BATCH_SIZE = 100;
 const MAX_CLOCK_DRIFT_MS = 60 * 1000; // DEFAULT_SYNC_CONFIG.maxClockDriftMs
 const MISC_TASKS_SPLIT_SCHEMA_VERSION = 2;
 const PIGGYBACK_LIMIT = 500;
 const FULL_STATE_OP_TYPES = new Set(['SYNC_IMPORT', 'BACKUP_IMPORT', 'REPAIR']);
-export const STATE_REPLACEMENT_REQUIRED_ERROR =
-  'Download the latest full-state replacement before retrying';
 
 export type ConflictType =
   | 'concurrent'
@@ -245,9 +272,11 @@ const isValidCalendarDate = (value: unknown): boolean => {
 };
 
 /**
- * The part of services/validation.service.ts validateOp that ops built by the
- * app can plausibly fail. Payload size/complexity limits and the entity-type
- * allowlist are not ported: fuzz payloads are small and use real action types.
+ * The part of services/validation.service.ts validateOp (and the payload shape
+ * rules of sync.types.ts validatePayload) that ops built by the app can
+ * plausibly fail, in the same order. Not ported: the op id, op type and entity
+ * type checks, clock sanitizing, payload size and depth limits, and BATCH
+ * payloads. Fuzz ops are small, use real action types and never batch.
  */
 export const validateOpSubset = (
   op: SyncOperation,
@@ -300,13 +329,28 @@ export const validateOpSubset = (
   if (!Number.isSafeInteger(op.timestamp)) {
     return { errorCode: 'INVALID_TIMESTAMP', error: 'Invalid timestamp' };
   }
+  // validatePayload: full-state ops skip it; DEL also allows null; a string is
+  // an encrypted payload; anything else must be a non-null object.
+  const payload: unknown = op.payload;
+  const isObject =
+    typeof payload === 'object' && payload !== null && !Array.isArray(payload);
+  const isValidShape =
+    isFullState ||
+    typeof payload === 'string' ||
+    isObject ||
+    (op.opType === 'DEL' && payload === null);
+  if (!isValidShape) {
+    return { errorCode: 'INVALID_PAYLOAD', error: 'Invalid payload shape' };
+  }
   return undefined;
 };
 
-const isCausalFullState = (op: SyncOperation): boolean =>
-  op.opType === 'SYNC_IMPORT' ||
-  op.opType === 'BACKUP_IMPORT' ||
-  (op.opType === 'REPAIR' && op.repairBaseServerSeq !== undefined);
+/** The op as the E2EE-only server sees it: a ciphertext it cannot read. */
+const asOpaque = (op: SyncOperation): SyncOperation => ({
+  ...op,
+  payload: 'e2ee-ciphertext',
+  isPayloadEncrypted: true,
+});
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
@@ -326,10 +370,7 @@ export class FakeSuperSyncServer {
   readonly rows: StoredOperation[] = [];
   /** Every rejection, for oracles and failure reports. */
   readonly rejections: FakeServerRejection[] = [];
-  /** Full-state uploads (SYNC_IMPORT / BACKUP_IMPORT / REPAIR) the fuzz never expects. */
-  readonly fullStateUploads: SyncOperation[] = [];
   private _lastSeq = 0;
-  private _latestStateReplacementSeq = 0;
 
   constructor(private readonly _now: () => number = () => Date.now()) {}
 
@@ -395,58 +436,37 @@ export class FakeSuperSyncServer {
       : { hasConflict: false };
   }
 
-  /** POST /api/sync/ops: sync.service.ts uploadOps + the route's piggyback. */
+  /**
+   * POST /api/sync/ops: the per-op loop of sync.service.ts uploadOps, then the
+   * route's piggyback (sync.routes.ops-handler.ts) of other clients' ops.
+   */
   uploadOps(
     rawOps: SyncOperation[],
     clientId: string,
     lastKnownServerSeq?: number,
   ): OpUploadResponse {
+    const fullState = rawOps.find((op) => FULL_STATE_OP_TYPES.has(op.opType));
+    if (fullState) {
+      throw new FuzzUnsupportedTransportError(
+        `full-state op upload (${fullState.opType}) from ${clientId}`,
+      );
+    }
     const ops = clone(rawOps);
     const now = this._now();
-    let results: OpUploadResult[];
-    if (
-      lastKnownServerSeq !== undefined &&
-      lastKnownServerSeq < this._latestStateReplacementSeq
-    ) {
-      results = ops.map((op) => ({
-        opId: op.id,
-        accepted: false,
-        error: STATE_REPLACEMENT_REQUIRED_ERROR,
-        errorCode: 'INTERNAL_ERROR',
-      }));
-    } else {
-      const firstById = new Map<string, { op: SyncOperation; ts: number }>();
-      results = ops.map((op) => {
-        const first = firstById.get(op.id);
-        if (!first) firstById.set(op.id, { op: { ...op }, ts: op.timestamp });
-        return this._processOperation(clientId, op, now, first);
-      });
-      ops.forEach((op, i) => {
-        if (
-          results[i].accepted &&
-          (op.opType === 'SYNC_IMPORT' || op.opType === 'BACKUP_IMPORT')
-        ) {
-          this._latestStateReplacementSeq = results[i].serverSeq!;
-        }
-      });
-    }
-    const requiresReplacementDownload =
-      results.length > 0 &&
-      results.every(
-        (r) =>
-          !r.accepted &&
-          r.errorCode === 'INTERNAL_ERROR' &&
-          r.error === STATE_REPLACEMENT_REQUIRED_ERROR,
-      );
+    const firstById = new Map<string, { op: SyncOperation; ts: number }>();
+    const results = ops.map((op) => {
+      const first = firstById.get(op.id);
+      if (!first) firstById.set(op.id, { op: { ...op }, ts: op.timestamp });
+      return this._processOperation(clientId, op, now, first);
+    });
     let newOps: ServerSyncOperation[] | undefined;
     let latestSeq = this.latestSeq;
     let hasMorePiggyback = false;
     if (lastKnownServerSeq !== undefined) {
       const piggyback = this.getOpsSinceWithSeq(
         lastKnownServerSeq,
-        requiresReplacementDownload ? undefined : clientId,
+        clientId,
         PIGGYBACK_LIMIT,
-        false,
       );
       newOps = piggyback.ops;
       latestSeq = piggyback.latestSeq;
@@ -462,7 +482,10 @@ export class FakeSuperSyncServer {
     });
   }
 
-  /** services/operation-upload.service.ts processOperation. */
+  /**
+   * services/operation-upload.service.ts processOperation. Decisions read the
+   * op through asOpaque: the real server only ever sees E2EE payloads.
+   */
   private _processOperation(
     clientId: string,
     op: SyncOperation,
@@ -487,8 +510,8 @@ export class FakeSuperSyncServer {
     };
     if (firstRequestOperation) {
       return isSameIncomingOperation(
-        firstRequestOperation.op,
-        op,
+        asOpaque(firstRequestOperation.op),
+        asOpaque(op),
         firstRequestOperation.ts,
         originalTimestamp,
       )
@@ -498,11 +521,16 @@ export class FakeSuperSyncServer {
             'Operation ID already belongs to a different operation',
           );
     }
-    const invalid = validateOpSubset(op, clientId);
+    const invalid = validateOpSubset(asOpaque(op), clientId);
     if (invalid) return reject(invalid.errorCode, invalid.error);
     const existing = this.rows.find((row) => row.op.id === op.id);
     if (existing) {
-      return isSameDuplicateOperation(existing, op, MAX_CLOCK_DRIFT_MS, originalTimestamp)
+      return isSameDuplicateOperation(
+        { ...existing, op: asOpaque(existing.op) },
+        asOpaque(op),
+        MAX_CLOCK_DRIFT_MS,
+        originalTimestamp,
+      )
         ? reject('DUPLICATE_OPERATION', 'Duplicate operation ID')
         : reject(
             'INVALID_OP_ID',
@@ -519,18 +547,10 @@ export class FakeSuperSyncServer {
       return reject(code, conflict.reason ?? code, conflict.existingClock);
     }
     const serverSeq = ++this._lastSeq;
-    // Pruning runs AFTER comparison, BEFORE storage. The active causal
-    // full-state author is protected only for oversized clocks.
-    const protectedIds =
-      Object.keys(op.vectorClock).length > MAX_VECTOR_CLOCK_SIZE
-        ? [...this.rows].reverse().find((row) => isCausalFullState(row.op))?.op.clientId
-        : undefined;
+    // Pruning runs AFTER comparison, BEFORE storage.
     const stored: SyncOperation = {
       ...op,
-      vectorClock: limitVectorClockSize(op.vectorClock, [
-        op.clientId,
-        ...(protectedIds ? [protectedIds] : []),
-      ]),
+      vectorClock: limitVectorClockSize(op.vectorClock, [op.clientId]),
       entityIds: getStoredEntityIds(op),
       isPayloadEncrypted: op.isPayloadEncrypted ?? false,
     };
@@ -543,43 +563,18 @@ export class FakeSuperSyncServer {
     return { opId: op.id, accepted: true, serverSeq };
   }
 
-  /** services/operation-download.service.ts getOpsSinceWithSeq (no snapshot clock). */
+  /** services/operation-download.service.ts getOpsSinceWithSeq, without full-state ops. */
   getOpsSinceWithSeq(
     sinceSeq: number,
     excludeClient: string | undefined,
     limit: number,
-    includeSnapshotMetadata: boolean,
-  ): {
-    ops: ServerSyncOperation[];
-    latestSeq: number;
-    gapDetected: boolean;
-    snapshotVectorClock?: VectorClock;
-  } {
+  ): { ops: ServerSyncOperation[]; latestSeq: number; gapDetected: boolean } {
     const latestSeq = this._lastSeq;
     if (latestSeq === 0) return { ops: [], latestSeq, gapDetected: sinceSeq > 0 };
-    const snapshotRow = [...this.rows].reverse().find((row) => isCausalFullState(row.op));
-    let effectiveSinceSeq = sinceSeq;
-    let snapshotVectorClock: VectorClock | undefined;
-    if (snapshotRow && sinceSeq < snapshotRow.serverSeq) {
-      effectiveSinceSeq = snapshotRow.serverSeq - 1;
-      if (includeSnapshotMetadata) {
-        // The server persists the aggregate of every prior clock plus the op's own.
-        const aggregate: VectorClock = {};
-        for (const row of this.rows.filter((r) => r.serverSeq <= snapshotRow.serverSeq)) {
-          for (const [id, counter] of Object.entries(row.op.vectorClock)) {
-            aggregate[id] = Math.max(aggregate[id] ?? 0, counter);
-          }
-        }
-        snapshotVectorClock = limitVectorClockSize(aggregate, [
-          ...(excludeClient ? [excludeClient] : []),
-          snapshotRow.op.clientId,
-        ]);
-      }
-    }
     const ops = this.rows
       .filter(
         (row) =>
-          row.serverSeq > effectiveSinceSeq &&
+          row.serverSeq > sinceSeq &&
           row.serverSeq <= latestSeq &&
           (!excludeClient || row.op.clientId !== excludeClient),
       )
@@ -591,12 +586,12 @@ export class FakeSuperSyncServer {
     }
     let gapDetected = sinceSeq > latestSeq && latestSeq > 0;
     if (sinceSeq > 0 && latestSeq > 0) {
-      if (minSeq !== null && effectiveSinceSeq < minSeq - 1) gapDetected = true;
-      if (!excludeClient && ops.length > 0 && ops[0].serverSeq > effectiveSinceSeq + 1) {
+      if (minSeq !== null && sinceSeq < minSeq - 1) gapDetected = true;
+      if (!excludeClient && ops.length > 0 && ops[0].serverSeq > sinceSeq + 1) {
         gapDetected = true;
       }
     }
-    return { ops, latestSeq, gapDetected, snapshotVectorClock };
+    return { ops, latestSeq, gapDetected };
   }
 
   /** GET /api/sync/ops (sync.routes.ts): limit+1 probe for `hasMore`. */
@@ -606,7 +601,7 @@ export class FakeSuperSyncServer {
     limit: number = 500,
   ): SuperSyncOpDownloadResponse {
     const maxLimit = Math.min(limit, 1000);
-    const result = this.getOpsSinceWithSeq(sinceSeq, excludeClient, maxLimit + 1, true);
+    const result = this.getOpsSinceWithSeq(sinceSeq, excludeClient, maxLimit + 1);
     const hasMore = result.ops.length > maxLimit;
     if (hasMore) result.ops.pop();
     return clone({
@@ -614,7 +609,6 @@ export class FakeSuperSyncServer {
       hasMore,
       latestSeq: result.latestSeq,
       gapDetected: result.gapDetected || undefined,
-      snapshotVectorClock: result.snapshotVectorClock,
       serverTime: this._now(),
       capabilities: { causalRepairSnapshots: true },
     });
@@ -670,28 +664,16 @@ export class FakeSuperSyncClient implements OperationSyncCapable<'superSyncOps'>
   }
 
   async uploadSnapshot(
-    state: unknown,
+    _state: unknown,
     clientId: string,
     reason: string,
-    vectorClock: VectorClock,
-    schemaVersion: number,
-    isPayloadEncrypted: boolean | undefined,
-    opId: string,
-    isCleanSlate?: boolean,
+    _vectorClock: VectorClock,
+    _schemaVersion: number,
+    _isPayloadEncrypted: boolean | undefined,
+    _opId: string,
+    _isCleanSlate?: boolean,
     snapshotOpType?: string,
   ): Promise<SnapshotUploadResponse> {
-    this._server.fullStateUploads.push({
-      id: opId,
-      clientId,
-      actionType: `[fuzz] snapshot ${reason}${isCleanSlate ? ' clean-slate' : ''}`,
-      opType: snapshotOpType ?? 'SYNC_IMPORT',
-      entityType: 'ALL',
-      payload: null,
-      vectorClock,
-      timestamp: Date.now(),
-      schemaVersion,
-      isPayloadEncrypted,
-    });
     throw new FuzzUnsupportedTransportError(
       `full-state upload (${snapshotOpType ?? 'SYNC_IMPORT'}, ${reason}) from ${clientId}`,
     );

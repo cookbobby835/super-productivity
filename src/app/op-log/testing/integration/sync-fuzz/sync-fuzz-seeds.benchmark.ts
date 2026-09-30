@@ -1,7 +1,7 @@
 import { DEFAULT_WEIGHTS, FuzzStep, IntentWeights } from './sync-fuzz-actions';
 import { SyncFuzzHarness } from './sync-fuzz-harness';
 import pinnedTraces from './sync-fuzz-pinned-traces.json';
-import { FuzzResult, runFuzz } from './sync-fuzz-runner';
+import { FuzzFailure, FuzzResult, runFuzz } from './sync-fuzz-runner';
 import { keepKarmaAlive, shrinkTrace } from './sync-fuzz-shrink';
 
 /**
@@ -12,8 +12,10 @@ import { keepKarmaAlive, shrinkTrace } from './sync-fuzz-shrink';
  *   npm run test:file src/app/op-log/testing/integration/sync-fuzz/sync-fuzz-seeds.benchmark.ts
  *
  * Each seed runs STEPS random steps of one intent mix on three devices. A
- * seed fails on a failure signature that no pinned trace shows
- * (sync-fuzz-pinned-traces.json). The first seed of each new signature is
+ * seed fails on a failure signature that no pinned trace explains
+ * (sync-fuzz-pinned-traces.json): a pin explains its primary signature, and
+ * its other signatures only in a run that also shows its primary. The first
+ * seed of each new signature is
  * then shrunk by delta debugging and printed, in its own spec, with its replay
  * results and a dump of the server log and every device's op log. Pin a trace
  * only once it fails 3 of 3 replays; an intermittent failure is a harness bug
@@ -49,12 +51,19 @@ const PROFILES: Record<string, IntentWeights> = {
 /** Traces to replay with a full dump, e.g. while triaging a pin. */
 const DEBUG_TRACES: [string, FuzzStep[]][] = [];
 
-const PINNED = new Set(
-  (pinnedTraces as unknown as { failures: { signature: string }[] }[]).flatMap((pin) =>
-    pin.failures.map((f) => f.signature),
-  ),
-);
-const isNew = (signature: string): boolean => IGNORE_PINNED || !PINNED.has(signature);
+const PINS = pinnedTraces as unknown as { primary?: string; signatures: string[] }[];
+
+/** The failures of a run that no pin explains. */
+const newFailures = (failures: FuzzFailure[]): FuzzFailure[] => {
+  if (IGNORE_PINNED) return failures;
+  const shown = new Set(failures.map((f) => f.signature));
+  const explained = new Set(
+    PINS.filter((pin) => pin.primary && shown.has(pin.primary)).flatMap(
+      (pin) => pin.signatures,
+    ),
+  );
+  return failures.filter((f) => !explained.has(f.signature));
+};
 
 interface Sweep {
   results: Map<string, FuzzResult>;
@@ -74,7 +83,7 @@ const runSweep = (): Promise<Sweep> =>
         keepKarmaAlive(seed);
         const result = await runFuzz({ seed, stepCount: STEPS, weights });
         results.set(`${profile} ${seed}`, result);
-        for (const { signature } of result.failures.filter((f) => isNew(f.signature))) {
+        for (const { signature } of newFailures(result.failures)) {
           const seen = firstSeen.find((f) => f.signature === signature);
           if (seen) seen.count++;
           else {
@@ -102,7 +111,7 @@ describe('sync fuzz random seeds', () => {
     for (let seed = FIRST_SEED; seed < FIRST_SEED + SEED_COUNT; seed++) {
       it(`${profile} seed ${seed} fails only as the pinned traces do`, async () => {
         const result = (await runSweep()).results.get(`${profile} ${seed}`)!;
-        expect(result.failures.filter((f) => isNew(f.signature)))
+        expect(newFailures(result.failures))
           .withContext(`seed=${seed} trace=${JSON.stringify(result.steps)}`)
           .toEqual([]);
       }, 900_000);

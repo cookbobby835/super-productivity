@@ -1,4 +1,4 @@
-import { ProviderToken } from '@angular/core';
+import { EnvironmentInjector, isSignal, ProviderToken } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { MatDialog } from '@angular/material/dialog';
 import { EffectsModule } from '@ngrx/effects';
@@ -6,8 +6,16 @@ import { Action, ActionReducer, MetaReducer, Store, StoreModule } from '@ngrx/st
 import { TranslateService } from '@ngx-translate/core';
 import { openDB } from 'idb';
 import { IDBFactory } from 'fake-indexeddb';
-import { firstValueFrom, of } from 'rxjs';
+import {
+  AsyncSubject,
+  BehaviorSubject,
+  firstValueFrom,
+  Observable,
+  of,
+  ReplaySubject,
+} from 'rxjs';
 import { BannerService } from '../../../../core/banner/banner.service';
+import { DateService } from '../../../../core/date/date.service';
 import { SnackService } from '../../../../core/snack/snack.service';
 import { ClientIdService } from '../../../../core/util/client-id.service';
 import { SnackParams } from '../../../../core/snack/snack.model';
@@ -66,6 +74,7 @@ import {
   PLUGIN_USER_DATA_FEATURE_NAME,
   pluginUserDataReducer,
 } from '../../../../plugins/store/plugin-user-data.reducer';
+import { AppStateActions } from '../../../../root-store/app-state/app-state.actions';
 import { appStateFeature } from '../../../../root-store/app-state/app-state.reducer';
 import { META_REDUCERS } from '../../../../root-store/meta/meta-reducer-registry';
 import { ArchiveOperationHandlerEffects } from '../../../apply/archive-operation-handler.effects';
@@ -98,11 +107,15 @@ import { ImmediateUploadService } from '../../../sync/immediate-upload.service';
 import { OperationLogDownloadService } from '../../../sync/operation-log-download.service';
 import { OperationLogSyncService } from '../../../sync/operation-log-sync.service';
 import { OperationWriteFlushService } from '../../../sync/operation-write-flush.service';
+import { RemoteOpsProcessingService } from '../../../sync/remote-ops-processing.service';
 import { RejectedOpsHandlerService } from '../../../sync/rejected-ops-handler.service';
+import { ServerMigrationService } from '../../../sync/server-migration.service';
 import { SyncSessionValidationService } from '../../../sync/sync-session-validation.service';
 import { countTransientRejections } from '../../../sync/upload-outcome.util';
 import { SyncProviderManager } from '../../../sync-providers/provider-manager.service';
 import { CLIENT_ID_PROVIDER } from '../../../util/client-id.provider';
+import { RepairOperationService } from '../../../validation/repair-operation.service';
+import { RepairSyncContextService } from '../../../validation/repair-sync-context.service';
 import {
   FakeSuperSyncClient,
   FakeSuperSyncServer,
@@ -125,8 +138,22 @@ import {
  *   device's own IndexedDB (ops, vector clock, state cache, archives);
  * - the client id and the device's SuperSync client (its cursor);
  * - the in-memory service state listed in DEVICE_FIELDS.
- * Anything else a service keeps in memory is shared: extend DEVICE_FIELDS
- * when the harness grows into it.
+ * Every other field of an instantiated app service must be listed in
+ * SHARED_FIELDS with the reason it may be shared; the harness checks this
+ * after every device turn and throws on an unlisted field. Module-level state
+ * is outside that check: the capture meta-reducer's deferred-action buffer is
+ * drained at every step boundary, and undo-task-delete.meta-reducer.ts keeps
+ * the last local task delete for undo, which the fuzz never runs.
+ *
+ * Known gaps against the app (SyncWrapperService._syncBody and the effects):
+ * - no provider-switch detection, lastSyncedProviderId, WebSocket or
+ *   immediate upload (stubbed), and no UI sync status;
+ * - the track intent copies the auto-add-to-Today effect's dueDay/dueWithTime
+ *   filter, but not its selectTodayTaskIds check (redundant here: Today
+ *   membership comes from dueDay/dueWithTime) or its distinctUntilChanged
+ *   memory. So the fuzz re-plans a task that a remote change unplanned
+ *   between two tracking sessions, where the app would not if no other task
+ *   was tracked in between.
  */
 
 const FUZZ_SET_STATE = '[SyncFuzz] Set device state';
@@ -165,12 +192,157 @@ const DEVICE_FIELDS: ReadonlyArray<readonly [ProviderToken<object>, readonly str
         '_hasUnseenRemoteOps',
         '_lastAnnouncedCheckpointSeq',
         'forcedDownloadCheckpoint',
+        'clockDriftTimeoutId',
+        'clockDriftRetryServerTimestamp',
       ],
     ],
     [RejectedOpsHandlerService, ['_resolutionAttemptsByEntity']],
-    [OperationCaptureService, ['unrecoveredPersistFailure']],
-    [OperationLogEffects, ['inMemoryCompactionCounter', 'compactionFailures']],
+    [
+      OperationCaptureService,
+      [
+        'unrecoveredPersistFailure',
+        'pendingCount',
+        'pendingTaskTimeEntries',
+        'hasWarnedAboutPending',
+      ],
+    ],
+    [
+      OperationLogEffects,
+      ['inMemoryCompactionCounter', 'compactionFailures', 'writeCount'],
+    ],
+    // Read by compaction; set around each hydration run.
+    [HydrationStateService, ['_isHydrationFallbackActive', '_isHydrationInProgress']],
+    [SyncSessionValidationService, ['_failed', '_sessionActive']],
+    [RepairSyncContextService, ['_baseServerSeqStack']],
+    [OperationLogHydratorService, ['_migrationRanDuringHydration']],
+    // Once-per-session latches: every device is its own app session.
+    [RepairOperationService, ['_hasShownRepairSnackThisSession']],
+    [OperationLogSyncService, ['_hasWarnedRebuildVersionBlockThisSession']],
+    [
+      RemoteOpsProcessingService,
+      ['_hasWarnedVersionBlockThisSession', '_hasWarnedMigrationFailureThisSession'],
+    ],
+    [ServerMigrationService, ['_validationFailureNotified']],
   ];
+
+const ROUTED =
+  'the routed op-log adapter: every call reaches the current device database';
+const SYNC_WINDOW =
+  'the sync window gates selector-based feature effects, which the harness does not register';
+const APPLY_WINDOW =
+  'the remote-apply window, which _settle checks is closed at every step boundary';
+const CONSTANT = 'a constant';
+
+/**
+ * In-memory service state that devices share on purpose, by class name and
+ * field, with the reason (SHARED_CLASSES: every field of a class). Injected
+ * services, functions and streams that keep no value (Observable, Subject)
+ * need no entry; signals, BehaviorSubjects and plain values do.
+ */
+const SHARED_FIELDS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  OperationLogStoreService: { _adapter: ROUTED, _db: ROUTED, _initPromise: ROUTED },
+  ArchiveStoreService: { _adapter: ROUTED, _db: ROUTED, _initPromise: ROUTED },
+  OperationLogEffects: {
+    isHandlingQuotaExceeded:
+      'set only on a storage-quota error, which the fuzz never hits',
+    lastStorageQuotaSnackAt:
+      'set only on a storage-quota error, which the fuzz never hits',
+    STORAGE_QUOTA_SNACK_DEDUPE_MS: CONSTANT,
+    _deferredProcessingChain: 'settled at every step boundary: _settle drains it',
+  },
+  OperationCaptureService: { PENDING_WARNING_THRESHOLD: CONSTANT },
+  OperationWriteFlushService: {
+    MAX_WAIT_TIME: CONSTANT,
+    MAX_CUTOFF_ATTEMPTS: CONSTANT,
+    POLL_INTERVAL: CONSTANT,
+  },
+  HydrationStateService: {
+    _isApplyingRemoteOps: APPLY_WINDOW,
+    _isDirectApplyActive: APPLY_WINDOW,
+    _applyingRemoteOpsHoldCount: APPLY_WINDOW,
+    _isInPostSyncCooldown: SYNC_WINDOW,
+    _isSyncWindowOpen: SYNC_WINDOW,
+    _cooldownTimer: SYNC_WINDOW,
+    _syncWindowFailsafeTimer: SYNC_WINDOW,
+    isInSyncWindow: SYNC_WINDOW,
+  },
+  LockService: {
+    _fallbackLocks: 'unused where Web Locks exist; no lock outlives a step',
+    _hasWarnedAboutMissingLocks: 'a log-only warn-once flag',
+  },
+  TaskTimeSyncService: {
+    _accumulator:
+      'filled only by TaskService ticks; the track intent dispatches the flush itself',
+  },
+  LegacyPfDbService: { _tabId: 'the identity of the one browser tab' },
+  BackupService: {
+    _protectedBackupId:
+      'set only inside restoreImportBackupById, which the fuzz never runs',
+  },
+  DateService: {
+    startOfNextDayDiff: 'from the start-of-day setting, which the fuzz keeps',
+  },
+};
+
+/** App services whose whole in-memory state devices share on purpose, with the reason. */
+const SHARED_CLASSES: Readonly<Record<string, string>> = {
+  SuperSyncStatusService: 'a UI indicator the sync path only writes to',
+  ImexViewService: 'the data-import flag; the fuzz never imports',
+  UserInputWaitStateService: 'set while a dialog waits; recorded dialogs close at once',
+  GlobalConfigService: 'derived from the global config, which the fuzz never edits',
+  LanguageService: 'the UI language, which the fuzz never changes',
+  DateTimeFormatService: 'the UI locale, which the fuzz never changes',
+};
+
+/** Angular, NgRx and test-bed classes: framework machinery, or the store that FUZZ_SET_STATE swaps. */
+const FRAMEWORK_CLASSES: ReadonlySet<string> = new Set([
+  'ActionsSubject',
+  'Actions',
+  'AfterRenderManager',
+  'ApplicationInitStatus',
+  'ApplicationModule',
+  'ApplicationRef',
+  'BrowserDynamicTestingModule',
+  'BrowserModule',
+  'BrowserTestingModule',
+  'ChangeDetectionSchedulerImpl',
+  'CommonModule',
+  'ComponentFactoryResolver',
+  'DomEventsPlugin',
+  'DomRendererFactory2',
+  'DynamicTestModule',
+  'EffectSources',
+  'EffectsFeatureModule',
+  'EffectsRootModule',
+  'EffectsRunner',
+  'ErrorHandler',
+  'EventManager',
+  'KeyEventsPlugin',
+  'NgModuleRef',
+  'NoopNgZone',
+  'PendingTasksInternal',
+  'R3Injector',
+  'ReducerManager',
+  'RootScopeModule',
+  'ScannedActionsSubject',
+  'SharedStylesHost',
+  'State',
+  'Store',
+  'StoreFeatureModule',
+  'StoreRootModule',
+  'TestBedApplicationErrorHandler',
+  'ZoneAwareEffectScheduler',
+]);
+
+/** True for a value no device owns: a function, or a stream that retains nothing. */
+const isStateless = (value: unknown): boolean =>
+  (typeof value === 'function' && !isSignal(value)) ||
+  (value instanceof Observable &&
+    !(
+      value instanceof BehaviorSubject ||
+      value instanceof ReplaySubject ||
+      value instanceof AsyncSubject
+    ));
 
 type FieldValues = Map<object, Record<string, unknown>>;
 
@@ -230,6 +402,9 @@ const recordingDialog = (onOpen: (name: string) => void): Partial<MatDialog> => 
 });
 
 export class SyncFuzzHarness {
+  /** Bumped by every new harness: an older one must no longer touch TestBed. */
+  private static _generation = 0;
+  private readonly _generation = ++SyncFuzzHarness._generation;
   readonly server: FakeSuperSyncServer;
   readonly devices: FuzzDevice[] = [];
   readonly events: FuzzEvent[] = [];
@@ -238,6 +413,7 @@ export class SyncFuzzHarness {
   private readonly _clock: FuzzClock;
   private _pristineState!: object;
   private _pristineFields!: FieldValues;
+  private readonly _deviceFieldNames = new Map<object, ReadonlySet<string>>();
 
   private constructor() {
     // Local noon of the real day: a run never crosses midnight, in any time
@@ -395,6 +571,16 @@ export class SyncFuzzHarness {
       TestBed.inject(OperationLogCompactionService),
       'compactIfBloated',
     );
+    // Every device starts on the fuzz day, as setStartOfNextDayDiffOnLoad
+    // sets it after loadAllData; the store's initial todayStr is the real
+    // date when the bundle loaded.
+    const dates = TestBed.inject(DateService);
+    TestBed.inject(Store).dispatch(
+      AppStateActions.setTodayString({
+        todayStr: dates.todayStr(),
+        startOfNextDayDiffMs: dates.getStartOfNextDayDiffMs(),
+      }),
+    );
     this._pristineState = await firstValueFrom(TestBed.inject(Store));
     this._pristineFields = new Map();
     for (const [token, names] of DEVICE_FIELDS) {
@@ -407,7 +593,9 @@ export class SyncFuzzHarness {
         values[name] = structuredClone(fieldsOf(instance)[name]);
       }
       this._pristineFields.set(instance, values);
+      this._deviceFieldNames.set(instance, new Set(names));
     }
+    this._checkServiceFields();
     // devError() confirms before throwing; answer "no" as production builds do
     // and record it. Every other confirm is the fresh-client prompt: accept.
     (window.confirm as jasmine.Spy).and.callFake((message?: string) => {
@@ -444,6 +632,7 @@ export class SyncFuzzHarness {
 
   /** Runs `fn` as `device`: swap in, run, let capture settle, swap out. */
   async as<T>(device: FuzzDevice, fn: () => Promise<T>): Promise<T> {
+    this._assertLive();
     if (this._current) {
       throw new Error(`SyncFuzz: ${device.name} while ${this._current.name} is active`);
     }
@@ -457,6 +646,58 @@ export class SyncFuzzHarness {
       device.state = await firstValueFrom(TestBed.inject(Store));
       device.fields = this._saveFields();
       this._current = undefined;
+      this._checkServiceFields();
+    }
+  }
+
+  /**
+   * A spec that timed out can leave its harness running while the next spec
+   * builds a new one on the shared TestBed; stop the old one at its next step.
+   */
+  private _assertLive(): void {
+    if (this._generation !== SyncFuzzHarness._generation) {
+      throw new Error(
+        'SyncFuzz: a stale harness (its spec probably timed out) tried to drive ' +
+          'the TestBed of a newer harness',
+      );
+    }
+  }
+
+  /**
+   * Fails on in-memory state of an instantiated app service that is neither
+   * swapped per device (DEVICE_FIELDS) nor shared on purpose (SHARED_FIELDS),
+   * so a new service field cannot leak between devices unnoticed.
+   */
+  private _checkServiceFields(): void {
+    const injector = TestBed.inject(EnvironmentInjector) as unknown as {
+      records: Map<unknown, { value: unknown } | null | undefined>;
+    };
+    const values = [...injector.records.values()].map((record) => record?.value);
+    const injected = new Set(
+      values.filter(
+        (value) =>
+          (typeof value === 'object' && value !== null) || typeof value === 'function',
+      ),
+    );
+    const unlisted: string[] = [];
+    for (const instance of values) {
+      if (!instance || typeof instance !== 'object' || Array.isArray(instance)) continue;
+      const name = instance.constructor?.name;
+      if (!name || name === 'Object' || FRAMEWORK_CLASSES.has(name)) continue;
+      if (SHARED_CLASSES[name]) continue;
+      const device = this._deviceFieldNames.get(instance);
+      const shared = SHARED_FIELDS[name];
+      for (const [field, value] of Object.entries(instance)) {
+        if (device?.has(field) || shared?.[field]) continue;
+        if (injected.has(value) || isStateless(value)) continue;
+        unlisted.push(`${name}.${field}`);
+      }
+    }
+    if (unlisted.length > 0) {
+      throw new Error(
+        'SyncFuzz: service state that is neither per device (DEVICE_FIELDS) nor ' +
+          `shared on purpose (SHARED_FIELDS): ${unlisted.join(', ')}`,
+      );
     }
   }
 
@@ -480,6 +721,7 @@ export class SyncFuzzHarness {
 
   /** Dispatches a local user action on the current device and waits for capture. */
   async dispatch(action: Action | PersistentAction): Promise<void> {
+    this._assertLive();
     this._device();
     TestBed.inject(Store).dispatch(action);
     await this._settle();
@@ -503,6 +745,7 @@ export class SyncFuzzHarness {
   }
 
   private async _settle(): Promise<void> {
+    this._assertLive();
     do {
       await TestBed.inject(OperationWriteFlushService).flushPendingWrites();
       await Promise.allSettled([...this._inFlight]);
@@ -551,13 +794,30 @@ export class SyncFuzzHarness {
             isNeverSynced,
             keepDecryptedPrefix: true,
           });
-          if (down.kind === 'cancelled' || down.kind === 'blocked_incompatible') {
-            this.record(device, 'sync-halted', `download ${down.kind}`);
+          const halt = (phase: string, kind: string): void =>
+            this.record(device, 'sync-halted', `${phase} ${kind}`);
+          if (
+            down.kind === 'cancelled' ||
+            down.kind === 'server_migration_skipped' ||
+            down.kind === 'blocked_incompatible'
+          ) {
+            halt('download', down.kind);
             return;
           }
           let up = await syncService.uploadPendingOps(device.client, { isNeverSynced });
+          if (up.kind === 'cancelled' || up.kind === 'blocked_incompatible') {
+            halt('upload', up.kind);
+            return;
+          }
+          if (up.kind === 'completed' && up.encryptionRequiredKeyMissing) {
+            halt('upload', 'encryptionRequiredKeyMissing');
+            return;
+          }
+          const completed: Extract<typeof up, { kind: 'completed' }>[] = [];
           const permanent = (): void => {
-            if (up.kind === 'completed' && up.permanentRejectionCount > 0) {
+            if (up.kind !== 'completed') return;
+            completed.push(up);
+            if (up.permanentRejectionCount > 0) {
               this.record(
                 device,
                 'permanent-rejection',
@@ -574,11 +834,18 @@ export class SyncFuzzHarness {
               : 0);
           for (let retry = 0; pending > 0 && retry < MAX_LWW_REUPLOAD_RETRIES; retry++) {
             up = await syncService.uploadPendingOps(device.client, { isNeverSynced });
+            if (up.kind === 'cancelled' || up.kind === 'blocked_incompatible') {
+              halt('re-upload', up.kind);
+              return;
+            }
             permanent();
             pending =
               up.kind === 'completed'
                 ? up.localWinOpsCreated + countTransientRejections(up)
                 : 0;
+          }
+          if (completed.some((result) => result.blockedByRejectedFullState)) {
+            halt('upload', 'blockedByRejectedFullState');
           }
           if (pending > 0) {
             this.record(
@@ -587,8 +854,9 @@ export class SyncFuzzHarness {
               `${pending} op(s) still pending`,
             );
           }
-          if (up.kind !== 'completed')
-            this.record(device, 'sync-halted', `upload ${up.kind}`);
+          if (completed.some((result) => result.fullStateUploadDeferred)) {
+            this.record(device, 'full-state', 'full-state upload deferred');
+          }
           if (session.hasFailed())
             this.record(device, 'validation', 'state invalid after sync');
         });

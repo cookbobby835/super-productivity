@@ -13,19 +13,11 @@
         "a": ["reorderHabits", 5, 0]
       }
     ],
-    "failures": [
-      {
-        "signature": "stop:SYNC_MULTI_ENTITY_UNSUPPORTED side=remote actionType=[SimpleCounter] Update SimpleCounter Order entityCount=3",
-        "detail": "step 3 B: SYNC_MULTI_ENTITY_UNSUPPORTED side=remote actionType=[SimpleCounter] Update SimpleCounter Order entityCount=3"
-      },
-      {
-        "signature": "pending",
-        "detail": "B has 1 unsynced op(s)"
-      },
-      {
-        "signature": "divergence:.simpleCounter.ids.*",
-        "detail": "B vs fresh at .simpleCounter.ids.3: \"h3\" vs \"h1\""
-      }
+    "primary": "stop:SYNC_MULTI_ENTITY_UNSUPPORTED side=remote actionType=[SimpleCounter] Update SimpleCounter Order",
+    "signatures": [
+      "divergence:.simpleCounter.ids.*",
+      "pending",
+      "stop:SYNC_MULTI_ENTITY_UNSUPPORTED side=remote actionType=[SimpleCounter] Update SimpleCounter Order"
     ],
     "rejections": []
   },
@@ -47,35 +39,15 @@
         "a": ["addTask", "t13", "P"]
       }
     ],
-    "failures": [
-      {
-        "signature": "stop:SYNC_MULTI_ENTITY_UNSUPPORTED side=remote actionType=[SimpleCounter] Update SimpleCounter Order entityCount=3",
-        "detail": "step 4 B: SYNC_MULTI_ENTITY_UNSUPPORTED side=remote actionType=[SimpleCounter] Update SimpleCounter Order entityCount=3"
-      },
-      {
-        "signature": "pending",
-        "detail": "B has 2 unsynced op(s)"
-      },
-      {
-        "signature": "divergence:.project.entities.*.taskIds.*",
-        "detail": "B vs fresh at .project.entities.INBOX_PROJECT.taskIds.0: \"t13\" vs \"t3\""
-      },
-      {
-        "signature": "divergence:.simpleCounter.ids.*",
-        "detail": "B vs fresh at .simpleCounter.ids.3: \"h3\" vs \"h1\""
-      },
-      {
-        "signature": "divergence:.task.entities.*",
-        "detail": "B vs fresh at .task.entities.t13: {\"id\":\"t13\",\"subTaskIds\":[],\"timeSpentOnDay\":{},\"timeSpent\":0,\"timeEstimate\":0,\"isDone\":false,\"title\":\"t13\",\"tagIds\":[],\"created\":<time>,\"attachments\":[] vs "
-      },
-      {
-        "signature": "divergence:.task.ids.*",
-        "detail": "B vs fresh at .task.ids.3: \"t13\" vs "
-      },
-      {
-        "signature": "lost-entity:task",
-        "detail": "task:t13 was never deleted"
-      }
+    "primary": "stop:SYNC_MULTI_ENTITY_UNSUPPORTED side=remote actionType=[SimpleCounter] Update SimpleCounter Order",
+    "signatures": [
+      "divergence:.project.entities.*.taskIds.*",
+      "divergence:.simpleCounter.ids.*",
+      "divergence:.task.entities.*",
+      "divergence:.task.ids.*",
+      "lost-entity:task",
+      "pending",
+      "stop:SYNC_MULTI_ENTITY_UNSUPPORTED side=remote actionType=[SimpleCounter] Update SimpleCounter Order"
     ],
     "rejections": []
   },
@@ -93,27 +65,13 @@
         "a": ["reorderNotes", "P", 3, 0]
       }
     ],
-    "failures": [
-      {
-        "signature": "stop:SYNC_MULTI_ENTITY_UNSUPPORTED side=remote actionType=[Note] Update Note Order entityCount=2",
-        "detail": "step 3 B: SYNC_MULTI_ENTITY_UNSUPPORTED side=remote actionType=[Note] Update Note Order entityCount=2"
-      },
-      {
-        "signature": "pending",
-        "detail": "B has 1 unsynced op(s)"
-      },
-      {
-        "signature": "divergence:.note.entities.*",
-        "detail": "B vs fresh at .note.entities.n1:  vs {\"id\":\"n1\",\"projectId\":\"INBOX_PROJECT\",\"isPinnedToToday\":false,\"content\":\"n1\",\"created\":<time>,\"modified\":<time>}"
-      },
-      {
-        "signature": "divergence:.note.ids.*",
-        "detail": "B vs fresh at .note.ids.2:  vs \"n1\""
-      },
-      {
-        "signature": "divergence:.project.entities.*.noteIds.*",
-        "detail": "B vs fresh at .project.entities.INBOX_PROJECT.noteIds.0: \"n2\" vs \"n1\""
-      }
+    "primary": "stop:SYNC_MULTI_ENTITY_UNSUPPORTED side=remote actionType=[Note] Update Note Order",
+    "signatures": [
+      "divergence:.note.entities.*",
+      "divergence:.note.ids.*",
+      "divergence:.project.entities.*.noteIds.*",
+      "pending",
+      "stop:SYNC_MULTI_ENTITY_UNSUPPORTED side=remote actionType=[Note] Update Note Order"
     ],
     "rejections": []
   },
@@ -123,24 +81,29 @@
     "name": "a note content edit that loses to an unpin stays on its device only",
     "steps": [
       {
-        "d": "C",
-        "a": ["editNote", "n3", "content", "C17"]
+        "d": "A",
+        "a": ["editNote", "n1", "isPinnedToToday", true],
+        "s": 1
       },
       {
         "d": "B",
-        "a": ["editNote", "n3", "isPinnedToToday", false]
-      }
-    ],
-    "failures": [
-      {
-        "signature": "divergence:.note.entities.*.content",
-        "detail": "C vs fresh at .note.entities.n3.content: \"C17\" vs \"n3\""
+        "s": 1
       },
       {
-        "signature": "field-reverted:note.content",
-        "detail": "note:n3.content: only write \"C17\", converged \"n3\""
+        "d": "C",
+        "s": 1
+      },
+      {
+        "d": "C",
+        "a": ["editNote", "n1", "content", "C17"]
+      },
+      {
+        "d": "B",
+        "a": ["editNote", "n1", "isPinnedToToday", false]
       }
     ],
+    "primary": "divergence:.note.entities.*.content",
+    "signatures": ["divergence:.note.entities.*.content", "field-reverted:note.content"],
     "rejections": []
   },
   {
@@ -150,22 +113,17 @@
     "steps": [
       {
         "d": "C",
-        "a": ["editHabit", "COFFEE_COUNTER", "title", "C24"]
+        "a": ["editHabit", "h1", "title", "C24"]
       },
       {
         "d": "A",
-        "a": ["countHabit", "COFFEE_COUNTER"]
+        "a": ["countHabit", "h1"]
       }
     ],
-    "failures": [
-      {
-        "signature": "divergence:.simpleCounter.entities.*.title",
-        "detail": "C vs fresh at .simpleCounter.entities.COFFEE_COUNTER.title: \"C24\" vs \"Coffee Counter\""
-      },
-      {
-        "signature": "field-reverted:habit.title",
-        "detail": "habit:COFFEE_COUNTER.title: only write \"C24\", converged \"Coffee Counter\""
-      }
+    "primary": "divergence:.simpleCounter.entities.*.title",
+    "signatures": [
+      "divergence:.simpleCounter.entities.*.title",
+      "field-reverted:habit.title"
     ],
     "rejections": []
   },
@@ -192,16 +150,8 @@
         "a": ["track", "t13", 2000]
       }
     ],
-    "failures": [
-      {
-        "signature": "divergence:.task.entities.*.title",
-        "detail": "C vs fresh at .task.entities.t13.title: \"C18\" vs \"t13\""
-      },
-      {
-        "signature": "field-reverted:task.title",
-        "detail": "task:t13.title: only write \"C18\", converged \"t13\""
-      }
-    ],
+    "primary": "divergence:.task.entities.*.title",
+    "signatures": ["divergence:.task.entities.*.title", "field-reverted:task.title"],
     "rejections": []
   },
   {
@@ -211,19 +161,15 @@
     "steps": [
       {
         "d": "A",
-        "a": ["countHabit", "COFFEE_COUNTER"]
+        "a": ["countHabit", "h1"]
       },
       {
         "d": "C",
-        "a": ["editHabit", "COFFEE_COUNTER", "title", "C26"]
+        "a": ["editHabit", "h1", "title", "C26"]
       }
     ],
-    "failures": [
-      {
-        "signature": "field-reverted:habit.countOnDay",
-        "detail": "habit:COFFEE_COUNTER.countOnDay.<day>: only write 1, converged "
-      }
-    ],
+    "primary": "field-reverted:habit.countOnDay",
+    "signatures": ["field-reverted:habit.countOnDay"],
     "rejections": []
   },
   {
@@ -233,23 +179,24 @@
     "steps": [
       {
         "d": "A",
-        "a": ["editNote", "n3", "isLock", true]
+        "a": ["editNote", "n1", "isPinnedToToday", true],
+        "s": 1
       },
       {
         "d": "B",
-        "a": ["editNote", "n3", "isPinnedToToday", false]
-      }
-    ],
-    "failures": [
-      {
-        "signature": "divergence:.note.todayOrder.*",
-        "detail": "B vs fresh at .note.todayOrder.0:  vs \"n3\""
+        "s": 1
       },
       {
-        "signature": "field-reverted:note.isLock",
-        "detail": "note:n3.isLock: only write true, converged "
+        "d": "A",
+        "a": ["editNote", "n1", "isLock", true]
+      },
+      {
+        "d": "B",
+        "a": ["editNote", "n1", "isPinnedToToday", false]
       }
     ],
+    "primary": "field-reverted:note.isLock",
+    "signatures": ["divergence:.note.todayOrder.*", "field-reverted:note.isLock"],
     "rejections": []
   },
   {
@@ -270,12 +217,8 @@
         "a": ["renameTask", "t2", "C28"]
       }
     ],
-    "failures": [
-      {
-        "signature": "field-reverted:task.isDone",
-        "detail": "task:t2.isDone: only write true, converged false"
-      }
-    ],
+    "primary": "field-reverted:task.isDone",
+    "signatures": ["field-reverted:task.isDone"],
     "rejections": ["CONFLICT_CONCURRENT [TASK] LWW Update"]
   },
   {
@@ -301,12 +244,8 @@
         "a": ["renameTask", "t2", "C29"]
       }
     ],
-    "failures": [
-      {
-        "signature": "time-loss:task",
-        "detail": "task:t2: tracked 3000, converged 0"
-      }
-    ],
+    "primary": "time-loss:task",
+    "signatures": ["time-loss:task"],
     "rejections": []
   },
   {
@@ -323,19 +262,11 @@
         "a": ["track", "t3", 2000]
       }
     ],
-    "failures": [
-      {
-        "signature": "divergence:.task.entities.*.timeSpent",
-        "detail": "B vs fresh at .task.entities.t3.timeSpent: 5000 vs 2000"
-      },
-      {
-        "signature": "divergence:.task.entities.*.timeSpentOnDay.*",
-        "detail": "B vs fresh at .task.entities.t3.timeSpentOnDay.<day>: 5000 vs 2000"
-      },
-      {
-        "signature": "time-loss:task",
-        "detail": "task:t3: tracked 5000, converged 2000"
-      }
+    "primary": "divergence:.task.entities.*.timeSpentOnDay.*",
+    "signatures": [
+      "divergence:.task.entities.*.timeSpent",
+      "divergence:.task.entities.*.timeSpentOnDay.*",
+      "time-loss:task"
     ],
     "rejections": []
   },
@@ -354,23 +285,12 @@
         "s": 1
       }
     ],
-    "failures": [
-      {
-        "signature": "validation:state invalid after sync",
-        "detail": "step 3 B: state invalid after sync"
-      },
-      {
-        "signature": "divergence:.note.entities.*.content",
-        "detail": "B vs fresh at .note.entities.n1.content:  vs \"n1\""
-      },
-      {
-        "signature": "divergence:.note.entities.*.created",
-        "detail": "B vs fresh at .note.entities.n1.created:  vs <time>"
-      },
-      {
-        "signature": "divergence:.project.entities.*.noteIds.*",
-        "detail": "B vs fresh at .project.entities.INBOX_PROJECT.noteIds.1:  vs \"n1\""
-      }
+    "primary": "validation:state invalid after sync",
+    "signatures": [
+      "divergence:.note.entities.*.content",
+      "divergence:.note.entities.*.created",
+      "divergence:.project.entities.*.noteIds.*",
+      "validation:state invalid after sync"
     ],
     "rejections": []
   },
@@ -389,35 +309,15 @@
         "s": 1
       }
     ],
-    "failures": [
-      {
-        "signature": "divergence:.task.entities.*.date",
-        "detail": "A vs fresh at .task.entities.t1.date: \"<day>\" vs "
-      },
-      {
-        "signature": "divergence:.task.entities.*.duration",
-        "detail": "A vs fresh at .task.entities.t1.duration: 2000 vs "
-      },
-      {
-        "signature": "divergence:.task.entities.*.subTasks",
-        "detail": "A vs fresh at .task.entities.t1.subTasks: [] vs "
-      },
-      {
-        "signature": "divergence:.task.entities.*.taskId",
-        "detail": "A vs fresh at .task.entities.t1.taskId: \"t1\" vs "
-      },
-      {
-        "signature": "divergence:.task.entities.*.timeSpent",
-        "detail": "A vs fresh at .task.entities.t1.timeSpent: 0 vs 2000"
-      },
-      {
-        "signature": "divergence:.task.entities.*.timeSpentOnDay",
-        "detail": "A vs fresh at .task.entities.t1.timeSpentOnDay: {} vs {\"<day>\":2000}"
-      },
-      {
-        "signature": "divergence:.task.ids.*",
-        "detail": "A vs fresh at .task.ids.0: \"t2\" vs \"t1\""
-      }
+    "primary": "divergence:.task.entities.*.taskId",
+    "signatures": [
+      "divergence:.task.entities.*.date",
+      "divergence:.task.entities.*.duration",
+      "divergence:.task.entities.*.subTasks",
+      "divergence:.task.entities.*.taskId",
+      "divergence:.task.entities.*.timeSpent",
+      "divergence:.task.entities.*.timeSpentOnDay",
+      "divergence:.task.ids.*"
     ],
     "rejections": []
   },
@@ -435,15 +335,10 @@
         "a": ["renameTask", "t3", "C29"]
       }
     ],
-    "failures": [
-      {
-        "signature": "divergence:.project.entities.*.taskIds.*",
-        "detail": "C vs fresh at .project.entities.INBOX_PROJECT.taskIds.0: \"t3\" vs \"t2\""
-      },
-      {
-        "signature": "restart-changed:.project.entities.*.taskIds.*",
-        "detail": "C after vs before restart at .project.entities.INBOX_PROJECT.taskIds.0: \"t2\" vs \"t3\""
-      }
+    "primary": "divergence:.project.entities.*.taskIds.*",
+    "signatures": [
+      "divergence:.project.entities.*.taskIds.*",
+      "restart-changed:.project.entities.*.taskIds.*"
     ],
     "rejections": []
   },
@@ -482,55 +377,20 @@
         "s": 1
       }
     ],
-    "failures": [
-      {
-        "signature": "divergence:.project.entities.*.taskIds.*",
-        "detail": "A vs fresh at .project.entities.INBOX_PROJECT.taskIds.1: \"t2\" vs \"t1\""
-      },
-      {
-        "signature": "divergence:.task.entities.*.timeSpent",
-        "detail": "A vs fresh at .task.entities.t2.timeSpent: 3000 vs 0"
-      },
-      {
-        "signature": "divergence:.task.entities.*.timeSpentOnDay",
-        "detail": "A vs fresh at .task.entities.t2.timeSpentOnDay: {\"<day>\":3000} vs {}"
-      },
-      {
-        "signature": "divergence:.task.entities.*.title",
-        "detail": "A vs fresh at .task.entities.t2.title: \"C8\" vs \"B13\""
-      },
-      {
-        "signature": "divergence:.tag.entities.*.taskIds.*",
-        "detail": "B vs fresh at .tag.entities.TODAY.taskIds.0: \"t2\" vs \"t1\""
-      },
-      {
-        "signature": "divergence:.task.ids.*",
-        "detail": "B vs fresh at .task.ids.1: \"t2\" vs \"t3\""
-      },
-      {
-        "signature": "restart-changed:.project.entities.*.taskIds.*",
-        "detail": "B after vs before restart at .project.entities.INBOX_PROJECT.taskIds.1: \"t1\" vs \"t2\""
-      },
-      {
-        "signature": "restart-changed:.tag.entities.*.taskIds.*",
-        "detail": "B after vs before restart at .tag.entities.TODAY.taskIds.0: \"t1\" vs \"t2\""
-      },
-      {
-        "signature": "restart-changed:.task.entities.*.timeSpent",
-        "detail": "B after vs before restart at .task.entities.t2.timeSpent: 0 vs 3000"
-      },
-      {
-        "signature": "restart-changed:.task.entities.*.timeSpentOnDay",
-        "detail": "B after vs before restart at .task.entities.t2.timeSpentOnDay: {} vs {\"<day>\":3000}"
-      },
-      {
-        "signature": "restart-changed:.task.entities.*.title",
-        "detail": "B after vs before restart at .task.entities.t2.title: \"B13\" vs \"C8\""
-      },
-      {
-        "signature": "restart-changed:.task.ids.*",
-        "detail": "B after vs before restart at .task.ids.1: \"t3\" vs \"t2\""
-      }
+    "primary": "restart-changed:.task.entities.*.title",
+    "signatures": [
+      "divergence:.project.entities.*.taskIds.*",
+      "divergence:.tag.entities.*.taskIds.*",
+      "divergence:.task.entities.*.timeSpent",
+      "divergence:.task.entities.*.timeSpentOnDay",
+      "divergence:.task.entities.*.title",
+      "divergence:.task.ids.*",
+      "restart-changed:.project.entities.*.taskIds.*",
+      "restart-changed:.tag.entities.*.taskIds.*",
+      "restart-changed:.task.entities.*.timeSpent",
+      "restart-changed:.task.entities.*.timeSpentOnDay",
+      "restart-changed:.task.entities.*.title",
+      "restart-changed:.task.ids.*"
     ],
     "rejections": ["CONFLICT_CONCURRENT [TASK] LWW Update"]
   },
@@ -548,12 +408,8 @@
         "a": ["addHabit", "h16"]
       }
     ],
-    "failures": [
-      {
-        "signature": "divergence:.simpleCounter.ids.*",
-        "detail": "C vs fresh at .simpleCounter.ids.6: \"h16\" vs \"h14\""
-      }
-    ],
+    "primary": "divergence:.simpleCounter.ids.*",
+    "signatures": ["divergence:.simpleCounter.ids.*"],
     "rejections": []
   },
   {
@@ -562,51 +418,34 @@
     "name": "Today note reorder crossing an unpin stops the unpinning device",
     "steps": [
       {
-        "d": "B",
-        "a": ["editNote", "n2", "isPinnedToToday", true]
+        "d": "A",
+        "a": ["editNote", "n1", "isPinnedToToday", true],
+        "s": 1
       },
       {
-        "d": "A",
-        "a": ["editNote", "n1", "isPinnedToToday", true]
+        "d": "B",
+        "s": 1
       },
       {
         "d": "C",
-        "a": ["editNote", "n3", "isPinnedToToday", false]
-      },
-      {
-        "d": "A",
         "s": 1
       },
       {
-        "d": "B",
-        "s": 1
+        "d": "C",
+        "a": ["editNote", "n1", "isPinnedToToday", false]
       },
       {
         "d": "B",
-        "a": ["reorderNotes", "T", 6, 7]
+        "a": ["reorderNotes", "T", 0, 1],
+        "s": 1
       }
     ],
-    "failures": [
-      {
-        "signature": "stop:SYNC_MULTI_ENTITY_UNSUPPORTED side=remote actionType=[Note] Update Note Order entityCount=3",
-        "detail": "step 7 C: SYNC_MULTI_ENTITY_UNSUPPORTED side=remote actionType=[Note] Update Note Order entityCount=3"
-      },
-      {
-        "signature": "pending",
-        "detail": "C has 1 unsynced op(s)"
-      },
-      {
-        "signature": "divergence:.note.entities.*.isPinnedToToday",
-        "detail": "C vs fresh at .note.entities.n1.isPinnedToToday: false vs true"
-      },
-      {
-        "signature": "divergence:.note.todayOrder.*",
-        "detail": "C vs fresh at .note.todayOrder.0:  vs \"n2\""
-      },
-      {
-        "signature": "field-reverted:note.isPinnedToToday",
-        "detail": "note:n3.isPinnedToToday: only write false, converged true"
-      }
+    "primary": "stop:SYNC_MULTI_ENTITY_UNSUPPORTED side=remote actionType=[Note] Update Note Order",
+    "signatures": [
+      "divergence:.note.entities.*.isPinnedToToday",
+      "divergence:.note.todayOrder.*",
+      "pending",
+      "stop:SYNC_MULTI_ENTITY_UNSUPPORTED side=remote actionType=[Note] Update Note Order"
     ],
     "rejections": []
   },
@@ -628,7 +467,7 @@
         "a": ["editNote", "n1", "isPinnedToToday", true]
       }
     ],
-    "failures": [],
+    "signatures": [],
     "rejections": ["CONFLICT_CONCURRENT [Note] Update Note"]
   },
   {
@@ -650,7 +489,7 @@
         "s": 1
       }
     ],
-    "failures": [],
+    "signatures": [],
     "rejections": ["CONFLICT_CONCURRENT [SIMPLE_COUNTER] LWW Update"]
   },
   {
@@ -671,7 +510,7 @@
         "a": ["reorderHabits", 5, 0]
       }
     ],
-    "failures": [],
+    "signatures": [],
     "rejections": ["CONFLICT_CONCURRENT [SimpleCounter] Update SimpleCounter Order"]
   },
   {
@@ -692,7 +531,7 @@
         "a": ["reorderHabits", 3, 4]
       }
     ],
-    "failures": [],
+    "signatures": [],
     "rejections": ["CONFLICT_CONCURRENT [SimpleCounter] Update SimpleCounter Order"]
   },
   {
@@ -714,7 +553,7 @@
         "a": ["track", "t2", 1000]
       }
     ],
-    "failures": [],
+    "signatures": [],
     "rejections": ["CONFLICT_CONCURRENT [TimeTracking] Sync time spent"]
   },
   {
@@ -744,7 +583,7 @@
         "s": 1
       }
     ],
-    "failures": [],
+    "signatures": [],
     "rejections": ["CONFLICT_CONCURRENT [TimeTracking] Sync time spent"]
   },
   {
@@ -774,10 +613,101 @@
         "s": 1
       }
     ],
-    "failures": [],
+    "signatures": [],
     "rejections": [
       "CONFLICT_CONCURRENT [Task Shared] updateTask",
       "CONFLICT_CONCURRENT [TimeTracking] Sync time spent"
     ]
+  },
+  {
+    "class": "coverage",
+    "ref": "coverage trace: no known bug",
+    "name": "a task archived on one device and restored on another converges across compactions and restarts",
+    "steps": [
+      {
+        "d": "A",
+        "a": ["doneTask", "t3", true],
+        "s": 1
+      },
+      {
+        "d": "B",
+        "s": 1
+      },
+      {
+        "d": "B",
+        "a": ["archiveTask", "t3"],
+        "s": 1
+      },
+      {
+        "d": "C",
+        "s": 1,
+        "c": 1
+      },
+      {
+        "d": "C",
+        "a": ["restoreTask", "t3"],
+        "s": 1,
+        "r": 1
+      },
+      {
+        "d": "A",
+        "a": ["addNote", "n11", "P"],
+        "s": 1,
+        "c": 1
+      },
+      {
+        "d": "B",
+        "s": 1,
+        "r": 1
+      }
+    ],
+    "signatures": [],
+    "rejections": []
+  },
+  {
+    "class": "coverage",
+    "ref": "coverage trace: no known bug",
+    "name": "ops made before a compaction and a restart upload and converge",
+    "steps": [
+      {
+        "d": "B",
+        "a": ["addTask", "t12", "P"],
+        "c": 1
+      },
+      {
+        "d": "B",
+        "a": ["renameTask", "t12", "B1"],
+        "r": 1
+      },
+      {
+        "d": "C",
+        "a": ["track", "t1", 2000],
+        "s": 1,
+        "c": 1
+      },
+      {
+        "d": "B",
+        "s": 1
+      },
+      {
+        "d": "A",
+        "a": ["editNote", "n2", "content", "A4"],
+        "s": 1,
+        "r": 1
+      },
+      {
+        "d": "C",
+        "a": ["addNote", "n13", "T"],
+        "s": 1
+      },
+      {
+        "d": "A",
+        "a": ["renameTask", "t1", "A6"],
+        "s": 1,
+        "c": 1
+      }
+    ],
+    "signatures": [],
+    "rejections": []
   }
 ]

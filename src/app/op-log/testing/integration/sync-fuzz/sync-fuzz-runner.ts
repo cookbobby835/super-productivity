@@ -19,10 +19,16 @@ import {
   generateIntent,
   Intent,
   IntentWeights,
+  isUiPossible,
   SETUP_INTENTS,
   viewOf,
 } from './sync-fuzz-actions';
-import { FuzzDevice, FuzzEventKind, SyncFuzzHarness } from './sync-fuzz-harness';
+import {
+  FuzzDevice,
+  FuzzEvent,
+  FuzzEventKind,
+  SyncFuzzHarness,
+} from './sync-fuzz-harness';
 
 /**
  * Runs one trace (generated from a seed, or replayed from a fixture) and
@@ -49,8 +55,6 @@ export interface FuzzOptions {
   seed?: number;
   steps?: FuzzStep[];
   stepCount?: number;
-  /** Stops tolerated by the "no stops" oracle (signature prefixes). */
-  knownStops?: readonly string[];
   /** Intent mix for generated traces (default DEFAULT_WEIGHTS). */
   weights?: IntentWeights;
   debug?: boolean;
@@ -64,6 +68,7 @@ const SETTLE_ROUNDS = 6;
 const FAILING_EVENTS: readonly FuzzEventKind[] = [
   'stop',
   'sync-error',
+  'sync-halted',
   'full-state',
   'validation',
   'permanent-rejection',
@@ -178,6 +183,24 @@ export const comparable = (state: unknown): unknown =>
 
 const shortJson = (value: unknown): string => JSON.stringify(value)?.slice(0, 160) ?? '';
 
+/**
+ * Classifies a sync event without ids. A multi-entity stop keeps its side and
+ * action type but not its entity count, which only follows list lengths.
+ */
+const eventSignature = (event: FuzzEvent): string => {
+  const stop =
+    event.kind === 'stop'
+      ? /^(SYNC_MULTI_ENTITY_UNSUPPORTED side=\w+ actionType=.+?) entityCount=\d+$/.exec(
+          event.detail,
+        )
+      : null;
+  return stop
+    ? `stop:${stop[1]}`
+    : `${event.kind}:${event.detail
+        .replace(/\b[tnh]\d+\b|fuzzDev\w|[0-9a-f-]{36}/g, '*')
+        .slice(0, 120)}`;
+};
+
 /** Strips the path of ids, indexes and days so it can classify a failure. */
 const pathSignature = (path: string): string =>
   path
@@ -257,14 +280,21 @@ export const runFuzz = async (options: FuzzOptions): Promise<FuzzResult> => {
       const name = DEVICES[Math.floor(random() * DEVICES.length)];
       const intent = await harness.as(deviceOf(name), async () => {
         const archive = await TestBed.inject(ArchiveDbAdapter).loadArchiveYoung();
-        return generateIntent(
+        const view = viewOf(await harness.state());
+        const generated = generateIntent(
           random,
-          viewOf(await harness.state()),
+          view,
           archive?.task.ids ?? [],
           `${name}${i}`,
           nextId,
           options.weights,
         );
+        if (generated && !isUiPossible(generated, view)) {
+          throw new Error(
+            `SyncFuzz: the generator emitted a step the UI does not offer: ${JSON.stringify(generated)}`,
+          );
+        }
+        return generated;
       });
       await runStep(
         {
@@ -293,14 +323,10 @@ export const runFuzz = async (options: FuzzOptions): Promise<FuzzResult> => {
   await harness.sync(observer);
 
   const eventsBeforeRestart = harness.events.length;
-  // Oracle: no stops or other sync failures (known stops excepted).
+  // Oracle: no stops or other sync failures.
   for (const event of harness.events) {
     if (!FAILING_EVENTS.includes(event.kind)) continue;
-    const signature = `${event.kind}:${event.detail
-      .replace(/\b[tnh]\d+\b|fuzzDev\w|[0-9a-f-]{36}/g, '*')
-      .slice(0, 120)}`;
-    if (options.knownStops?.some((known) => signature.startsWith(known))) continue;
-    fail(signature, `step ${event.step} ${event.device}: ${event.detail}`);
+    fail(eventSignature(event), `step ${event.step} ${event.device}: ${event.detail}`);
   }
 
   // Oracle: nothing pending, no full-state op anywhere.
