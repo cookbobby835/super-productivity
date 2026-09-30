@@ -41,9 +41,11 @@ Decide these then, with the evidence available at that time:
 2. **Coverage:** every sync endpoint — uploads, snapshot, reset, restore,
    downloads and the WebSocket handshake — not only mutations. Clients from
    this release send `appVersion` on the handshake too
-   (`super-sync-websocket.service.ts`). A refused handshake has no JSON body
-   the client can read, so it only reconnects with backoff; the notice comes
-   from the next HTTP request.
+   (`super-sync-websocket.service.ts`). Refuse the handshake at the upgrade
+   (an HTTP status), not with a close code after it opens: the client then
+   reconnects with 1–60 s backoff for up to 50 attempts, while close codes
+   4003, 4008 and 4009 stop reconnecting. No handshake refusal has a body the
+   client reads, so the notice comes from the next HTTP request.
 3. **Never:**
    - 401/403: released clients sign out after three.
    - Per-op rejections inside a 200: they permanently drop that device's edits
@@ -56,11 +58,16 @@ Decide these then, with the evidence available at that time:
      code from new clients.
 5. **Request volume:** a refused client keeps its ops pending and retries.
    `ImmediateUploadService` swallows the error, so each debounced local edit
-   still sends one refused upload. Size rate limits for that.
-6. **Rollout:**
+   still sends one refused upload, and a dropped WebSocket retries its
+   handshake with backoff. Size rate limits for that.
+6. **Actions outside the sync cycle:** restore points, encryption changes and
+   the device list call the server directly. A refusal there shows their own
+   generic error, not the update notice. Nothing is lost, since the request is
+   refused whole; route them to the notice if that matters by then.
+7. **Rollout:**
    - Off by default for self-hosted servers.
    - Advertise the capability the way `supportsCausalRepairSnapshots` does.
-7. **File providers are out of scope.** They have no server. Stopping released
+8. **File providers are out of scope.** They have no server. Stopping released
    clients there needs a demonstrated per-provider migration (a new format or
    namespace), as the architecture review's Phase 3 describes. A version field
    alone is ignored by released clients.
