@@ -240,8 +240,11 @@ export class SyncFuzzHarness {
   private _pristineFields!: FieldValues;
 
   private constructor() {
-    const realNow = performance.timeOrigin + performance.now();
-    this._clock = new FuzzClock(Math.floor(realNow / 60_000) * 60_000);
+    // Local noon of the real day: a run never crosses midnight, in any time
+    // zone, and its "today" matches `new Date()` in app code.
+    const noon = new Date();
+    noon.setHours(12, 0, 0, 0);
+    this._clock = new FuzzClock(noon.getTime());
     (jasmine.isSpy(Date.now)
       ? (Date.now as jasmine.Spy)
       : spyOn(Date, 'now')
