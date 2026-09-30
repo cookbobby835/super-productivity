@@ -3,6 +3,7 @@ import { expect, test } from '../../fixtures/webdav.fixture';
 import { SyncPage } from '../../pages/sync.page';
 import { WorkViewPage } from '../../pages/work-view.page';
 import {
+  addNoteInUi,
   dispatch,
   fullStateOps,
   type ListName,
@@ -39,7 +40,14 @@ interface Client {
   work: WorkViewPage;
 }
 
-const crossings: { list: ListName; other: OtherName; pendingOrder: boolean }[] = [
+const crossings: {
+  list: ListName;
+  other: OtherName;
+  pendingOrder: boolean;
+  /** A adds a note before its order; the winning order does not list it. */
+  addsNote?: boolean;
+}[] = [
+  { list: 'project notes', other: 'order', pendingOrder: true, addsNote: true },
   { list: 'habits', other: 'order', pendingOrder: true },
   { list: 'project notes', other: 'order', pendingOrder: true },
   { list: 'project notes', other: 'Today order', pendingOrder: true },
@@ -48,10 +56,11 @@ const crossings: { list: ListName; other: OtherName; pendingOrder: boolean }[] =
 ];
 
 test.describe('@webdav reorder crossings (#10377)', () => {
-  for (const { list, other, pendingOrder } of crossings) {
+  for (const { list, other, pendingOrder, addsNote } of crossings) {
     const name =
       `${list} order vs ${other}` +
-      (other === 'order' ? '' : ` / local-${pendingOrder ? 'order' : other}`);
+      (other === 'order' ? '' : ` / local-${pendingOrder ? 'order' : other}`) +
+      (addsNote ? ' / a note added before the order stays listed' : '');
     test(name, async ({ browser, baseURL, request, webdavServerUp }, testInfo) => {
       void webdavServerUp;
       test.setTimeout(240000);
@@ -118,6 +127,8 @@ test.describe('@webdav reorder crossings (#10377)', () => {
             .toHaveLength(1);
           return pending(await rows(client.page)).find((r) => r.op.a === code)!.op;
         };
+        if (addsNote)
+          ids.push(await addNoteInUi(a.page, `Added on A ${testInfo.testId}`));
         const local = await act(a);
         await act(b);
         const reordered = await snapshot(orderClient.page, list, ids);
@@ -136,7 +147,10 @@ test.describe('@webdav reorder crossings (#10377)', () => {
 
         const final = await snapshot(a.page, list, ids);
         expect(await snapshot(b.page, list, ids)).toEqual(final);
-        if (other === 'order') {
+        if (addsNote) {
+          expect(final.order).toContain(ids[ids.length - 1]);
+          expect([...final.order].sort()).toEqual([...ids].sort());
+        } else if (other === 'order') {
           expect([reordered.order, otherSide.order]).toContainEqual(final.order);
           expect(final.entities).toEqual(before.entities);
         } else if (other === 'Today order') {

@@ -875,32 +875,57 @@ export class SupersededOperationResolverService {
    * #10377: reissues each pending reorder that crossed an applied remote
    * reorder or note delete (`isReissuedReorderCrossing`), as the rejection path
    * above does once the server refuses it. File-based providers never refuse an
-   * upload: without this, receivers would apply the stale original over the
-   * remote op and diverge. It scans every retained applied remote row, so a
-   * reissue skipped here heals on a later download. The same causal proof
-   * applies; an unproven reorder stays pending for the rejection path, and so
-   * does every reorder while live state may hold an unpersisted change.
-   * The caller holds the OPERATION_LOG lock.
+   * upload: a stale original would reach receivers that apply it over the
+   * remote op and diverge. So this runs after every download and before every
+   * upload (the caller holds the OPERATION_LOG lock), scanning every retained
+   * applied remote row. While live state may hold an unpersisted change the
+   * reissue is deferred: `deferredOpIds` must stay out of the upload. Without
+   * the causal proof (compaction removed the remote row) it keeps the safety
+   * stop, as the rejection path does.
    */
-  async reissueCrossedPendingReorders(): Promise<number> {
+  async reissueCrossedPendingReorders(): Promise<{
+    created: number;
+    deferredOpIds: string[];
+  }> {
+    const none = { created: 0, deferredOpIds: [] };
     const pending = (await this.opLogStore.getUnsynced()).map(({ op }) => op);
-    if (!pending.some(isReissuableReorder)) return 0;
+    if (!pending.some(isReissuableReorder)) return none;
     const entries = await this.opLogStore.getOpsAfterSeq(0);
     const applied = entries
       .filter(
         (entry) =>
           entry.source === 'remote' &&
           entry.applicationStatus === 'applied' &&
-          entry.rejectedAt === undefined,
+          entry.rejectedAt === undefined &&
+          entry.reducerRejectedAt === undefined,
       )
       .map(({ op }) => op);
+    const crossed = selectCrossedPendingReorders(pending, applied);
+    if (crossed.length === 0) return none;
     const context = buildSectionCausalReplayContext(entries);
-    const proven = selectCrossedPendingReorders(pending, applied).filter(
-      (item) => this._getSectionCausalReplayDecision(item, context) === 'replay',
+    const unproven = crossed.find(
+      (item) => this._getSectionCausalReplayDecision(item, context) !== 'replay',
     );
-    if (proven.length === 0 || getPhantomChangeRisk(this.operationCapture)) return 0;
+    if (unproven) {
+      throw new UnsupportedMultiEntityConflictError(
+        'local',
+        unproven.op.actionType,
+        getOpEntityIds(unproven.op).length,
+      );
+    }
+    const deferred = {
+      created: 0,
+      deferredOpIds: crossed.map(({ opId }) => opId),
+    };
+    if (getPhantomChangeRisk(this.operationCapture)) return deferred;
     try {
-      return await this.resolveSupersededLocalOps(proven, undefined, undefined, true);
+      const created = await this.resolveSupersededLocalOps(
+        crossed,
+        undefined,
+        undefined,
+        true,
+      );
+      return { created, deferredOpIds: [] };
     } catch (e) {
       // Projection throws before writing anything when a change arrives meanwhile.
       if (!getPhantomChangeRisk(this.operationCapture)) throw e;
@@ -908,7 +933,7 @@ export class SupersededOperationResolverService {
         'SupersededOperationResolverService: Deferred crossed reorder reissue ' +
           'while a local change awaits persistence.',
       );
-      return 0;
+      return deferred;
     }
   }
 }

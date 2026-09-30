@@ -238,6 +238,17 @@ export const renderedOrder = async (page: Page, list: ListName): Promise<string[
   return visibleNotes(page);
 };
 
+/** Adds a project note in the real UI and returns its id. */
+export const addNoteInUi = async (page: Page, content: string): Promise<string> => {
+  await openNotes(page);
+  const before = await visibleNotes(page);
+  await new NotePage(page).addNote(content);
+  await expect
+    .poll(async () => (await visibleNotes(page)).length)
+    .toBe(before.length + 1);
+  return (await visibleNotes(page)).find((id) => !before.includes(id))!;
+};
+
 export const removeNote = async (page: Page, id: string): Promise<void> => {
   await openNotes(page);
   const note = page.locator(`#n-${id}`);

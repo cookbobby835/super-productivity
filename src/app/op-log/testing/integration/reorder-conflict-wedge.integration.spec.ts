@@ -629,7 +629,7 @@ describe('reorder conflicts: real store, applier, reducers and durable replay (#
         const superseded = TestBed.inject(SupersededOperationResolverService);
         const created =
           via === 'download'
-            ? await superseded.reissueCrossedPendingReorders()
+            ? (await superseded.reissueCrossedPendingReorders()).created
             : await superseded.resolveSupersededLocalOps([
                 { opId: local.id, op: local, existingClock: remote.vectorClock },
               ]);
@@ -679,6 +679,56 @@ describe('reorder conflicts: real store, applier, reducers and durable replay (#
     }
   }
 
+  it('keeps a note added before a crossed project order in every list', async () => {
+    const add = addNote({
+      note: {
+        id: 'added',
+        content: 'added',
+        projectId: PROJECT,
+        created: 100,
+        modified: 100,
+        isPinnedToToday: false,
+      },
+    });
+    const addOp = capture(add, 'local', 1500);
+    const orderAction = noteOrder(['added', ...IDS], 'project');
+    const local = {
+      ...capture(orderAction, 'local', 2000),
+      vectorClock: { ...addOp.vectorClock, local: 2 },
+    };
+    const remote = capture(
+      noteOrder([IDS[1], IDS[2], IDS[0]], 'project'),
+      'remote',
+      1000,
+    );
+    for (const [action, op] of [
+      [add, addOp],
+      [orderAction, local],
+    ] as const) {
+      store.dispatch(action);
+      await db.append(op, 'local');
+    }
+    await TestBed.inject(ConflictResolutionService).autoResolveConflictsLWW([], [remote]);
+    expect(
+      await TestBed.inject(
+        SupersededOperationResolverService,
+      ).reissueCrossedPendingReorders(),
+    ).toEqual({ created: 1, deferredOpIds: [] });
+    const list = (await state()).projects.entities[PROJECT]!.noteIds;
+    expect(list).toContain('added');
+
+    // The device that sent `remote` receives the add and the reissue.
+    const reissue = (await db.getUnsynced())
+      .map((row) => row.op)
+      .find((op) => op.actionType === local.actionType)!;
+    resetProjection(initial);
+    await TestBed.inject(OperationApplierService).applyOperations(
+      [remote, addOp, reissue],
+      { isLocalHydration: true },
+    );
+    expect((await state()).projects.entities[PROJECT]!.noteIds).toEqual(list);
+  });
+
   it('leaves a crossed order pending when compaction removed the proof', async () => {
     const localAction = noteOrder(IDS, 'project');
     const local = capture(localAction, 'local', 2000);
@@ -692,12 +742,13 @@ describe('reorder conflicts: real store, applier, reducers and durable replay (#
     await TestBed.inject(ConflictResolutionService).autoResolveConflictsLWW([], [remote]);
     await db.deleteOpsWhere((row) => row.op.id === remote.id);
 
-    const created = await TestBed.inject(
-      SupersededOperationResolverService,
-    ).reissueCrossedPendingReorders();
-
-    // The server-rejection path keeps its safety stop for it.
-    expect(created).toBe(0);
+    // Nothing shows the crossing any more; the server-rejection path keeps
+    // its safety stop for it.
+    expect(
+      await TestBed.inject(
+        SupersededOperationResolverService,
+      ).reissueCrossedPendingReorders(),
+    ).toEqual({ created: 0, deferredOpIds: [] });
     expect((await db.getUnsynced()).map((row) => row.op.id)).toEqual([local.id]);
   });
 
@@ -718,12 +769,19 @@ describe('reorder conflicts: real store, applier, reducers and durable replay (#
     ).and.returnValue(1);
     const resolver = TestBed.inject(SupersededOperationResolverService);
 
-    expect(await resolver.reissueCrossedPendingReorders()).toBe(0);
+    // The upload must hold it back until the reissue can run.
+    expect(await resolver.reissueCrossedPendingReorders()).toEqual({
+      created: 0,
+      deferredOpIds: [local.id],
+    });
     expect((await db.getUnsynced()).map((row) => row.op.id)).toEqual([local.id]);
 
-    // A later download reissues it from the retained remote row.
+    // The next download or upload reissues it from the retained remote row.
     pendingWrites.and.returnValue(0);
-    expect(await resolver.reissueCrossedPendingReorders()).toBe(1);
+    expect(await resolver.reissueCrossedPendingReorders()).toEqual({
+      created: 1,
+      deferredOpIds: [],
+    });
     expect((await db.getOpById(local.id))?.rejectedAt).toBeDefined();
   });
 

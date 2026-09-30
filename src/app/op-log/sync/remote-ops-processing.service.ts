@@ -519,8 +519,9 @@ export class RemoteOpsProcessingService {
 
       // #10377: a pending reorder that crossed a competing order or a delete
       // applied above is reissued now, before it can upload stale.
-      localWinOpsCreated +=
-        await this.supersededOperationResolver.reissueCrossedPendingReorders();
+      localWinOpsCreated += (
+        await this.supersededOperationResolver.reissueCrossedPendingReorders()
+      ).created;
     });
     return {
       localWinOpsCreated,

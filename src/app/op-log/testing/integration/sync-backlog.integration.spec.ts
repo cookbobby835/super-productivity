@@ -222,7 +222,10 @@ describe('Sync backlog longer than one download pass (integration)', () => {
           provide: SupersededOperationResolverService,
           useValue: jasmine.createSpyObj('SupersededOperationResolverService', {
             resolveSupersededLocalOps: undefined,
-            reissueCrossedPendingReorders: Promise.resolve(0),
+            reissueCrossedPendingReorders: Promise.resolve({
+              created: 0,
+              deferredOpIds: [],
+            }),
           }),
         },
         {

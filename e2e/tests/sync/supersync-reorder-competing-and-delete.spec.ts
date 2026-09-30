@@ -8,6 +8,7 @@ import {
   type SimulatedE2EClient,
 } from '../../utils/supersync-helpers';
 import {
+  addNoteInUi,
   dispatch,
   fullStateOps,
   type ListName,
@@ -271,6 +272,59 @@ for (const crossing of crossings) {
     }
   }
 }
+
+// The competing order that wins does not list a note the other device added
+// before its own order; the note must stay listed everywhere.
+test('@supersync reorder crossing: a note added before a competing project order stays listed', async ({
+  browser,
+  baseURL,
+  testRunId,
+}) => {
+  test.setTimeout(240000);
+  const clients: SimulatedE2EClient[] = [];
+  const config = getSuperSyncConfig(await createTestUser(testRunId));
+  const join = async (clientName: string): Promise<SimulatedE2EClient> => {
+    const client = await createSimulatedClient(browser, baseURL!, clientName, testRunId);
+    clients.push(client);
+    await client.sync.setupSuperSync(config);
+    await client.page.addInitScript(() => {
+      const flags = window as unknown as Record<string, unknown>;
+      flags.__SP_E2E_BLOCK_AUTO_SYNC = true;
+      flags.__SP_E2E_BLOCK_IMMEDIATE_UPLOAD = true;
+      flags.__SP_E2E_BLOCK_WS_DOWNLOAD = true;
+    });
+    return client;
+  };
+  try {
+    const ids = ['first', 'second', 'third'].map((id) => `${id}-${testRunId}`);
+    const a = await join('A');
+    await dispatch(a.page, seeds('project notes', ids));
+    await sync(a);
+    const b = await join('B');
+    await sync(b);
+    await sync(a);
+
+    const added = await addNoteInUi(a.page, `Added on A ${testRunId}`);
+    await reorder(a.page, 'project notes', 0);
+    await reorder(b.page, 'project notes', 1);
+    await sync(b);
+    await sync(a);
+    await sync(b);
+    await sync(a);
+
+    const all = [...ids, added];
+    const final = await snapshot(a.page, 'project notes', all);
+    expect(final.order).toContain(added);
+    expect([...final.order].sort()).toEqual([...all].sort());
+    expect(await snapshot(b.page, 'project notes', all)).toEqual(final);
+    for (const client of clients) expect(pending(await rows(client.page))).toEqual([]);
+    const fresh = await join('Fresh');
+    await sync(fresh);
+    expect(await snapshot(fresh.page, 'project notes', all)).toEqual(final);
+  } finally {
+    for (const client of clients) await closeClient(client);
+  }
+});
 
 // A released (v19.1.0) device sends the competing order or the delete first and
 // consumes the current device's reissue. A released device holding the pending

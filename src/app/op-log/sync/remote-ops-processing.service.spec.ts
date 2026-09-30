@@ -496,7 +496,7 @@ describe('RemoteOpsProcessingService', () => {
           'reissueCrossedPendingReorders',
         ).and.callFake(async () => {
           callOrder.push('reissue');
-          return 2;
+          return { created: 2, deferredOpIds: [] };
         });
         vectorClockServiceSpy.getEntityFrontier.and.resolveTo(new Map());
 

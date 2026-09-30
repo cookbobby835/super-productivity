@@ -578,10 +578,14 @@ export const projectReducer = createReducer<ProjectState>(
       ? projectAdapter.updateOne(
           {
             id: project.id,
+            // A reorder changes positions, not membership (as for Today): a
+            // remote order must neither bring back a note this device deleted
+            // or moved away, nor drop one it added meanwhile (#10377).
             changes: {
-              // A remote order can list a note this device deleted or moved
-              // away concurrently (#10377); it must not come back as a dangling id.
-              noteIds: ids.filter((id) => project.noteIds.includes(id)),
+              noteIds: [
+                ...project.noteIds.filter((id) => !ids.includes(id)),
+                ...ids.filter((id) => project.noteIds.includes(id)),
+              ],
             },
           },
           state,

@@ -121,27 +121,32 @@ lists are `project.noteIds`, `note.todayOrder` and `simpleCounter.ids`:
   list, so both survive.
 - **A note delete:** the delete wins. A pending reorder is reissued without the
   deleted id and keeps its positions of the other notes. A remote order applied
-  over a pending delete drops the id, because both note lists keep only ids
-  already in them (`projectReducer`'s `updateNoteOrder` filters `noteIds` for
-  this since #10377; a dangling id crashed the notes panel).
-- **File-based providers never reject an upload,** so every provider reissues
-  at download time (`reissueCrossedPendingReorders`, called by
-  `RemoteOpsProcessingService` after it applies the batch) with the same causal
-  proof: the crossing remote row is the retained, applied one. Without it,
-  competing orders diverge on WebDAV (verified by disabling it). An unproven
-  reorder stays pending for the server-rejection path. A reissue skipped
-  because live state may hold an unpersisted change, or lost to a crash after
-  the apply, runs on the next download, since the scan covers every retained
-  applied remote row. Known gap: on a file-based provider an upload before
-  that download still sends the stale original, whose receivers apply both
-  ops in arrival order.
+  over a pending delete drops the id: on current clients a note order changes
+  positions, never membership. Since #10377 `projectReducer`'s
+  `updateNoteOrder` keeps only ids already in `noteIds` and keeps unlisted
+  members at the front, as the note reducer does for `todayOrder` (#10298). A
+  dangling id crashed the notes panel; a dropped member, such as a note added
+  before a competing order, vanished from the project on every device.
+  Released reducers write the ids as given; they only ever receive reissues,
+  which carry the full current list.
+- **File-based providers never reject an upload,** so the reissue does not wait
+  for a rejection (`reissueCrossedPendingReorders`, same causal proof: the
+  crossing remote row is the retained, applied one). It runs after every
+  download (`RemoteOpsProcessingService`) and before every upload
+  (`OperationLogUploadService`), scanning every retained applied remote row.
+  Without it, competing orders diverge on WebDAV (verified by disabling it).
+  While live state may hold an unpersisted change the reissue is deferred and
+  the upload holds the crossed order back, so a stale original never uploads.
+  A crossed order without the proof keeps the safety stop. A crossing whose
+  remote row was compacted away is not seen at all: the order uploads as it is
+  and, on SuperSync, the server-rejection path stops as before.
 
 A habit delete keeps the stop: a habit order fills the slots of the habits it
 lists, so a delete shifts them around an unlisted (disabled) habit and the two
 application orders differ. Boards, sections and issue providers keep the stop
 for competing orders and deletes: `sortIssueProvidersFirst` keeps deleted ids,
-and none of these crossings has an E2E yet. Container moves and Today membership against a Today or tag
-reorder are not recognized either. Missing, ambiguous, malformed or
+and none of these crossings has an E2E yet. Container moves and Today
+membership against a Today or tag reorder are not recognized either. Missing, ambiguous, malformed or
 non-commuting evidence does not admit replay. Recognized content reorders
 (including section reorders) then remain pending with
 `UnsupportedMultiEntityConflictError`: generic entity LWW loses list writes.
