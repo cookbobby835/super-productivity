@@ -116,7 +116,10 @@ lists are `project.noteIds`, `note.todayOrder` and `simpleCounter.ids`:
   one and the reissue carries the list as it now stands, so the order that
   reached the server first wins. Either device's order may survive (#10264's
   decision); timestamps do not decide. Every Today and tag order writes
-  `note.todayOrder`, so they compete with each other.
+  `note.todayOrder`, so they compete with each other. Two habit orders must
+  list the same habits: each fills the slots of its own habits, so orders over
+  different habit sets (a habit added, enabled or disabled on one device) end
+  differently on each side and keep the stop.
 - **A project order against a Today or tag order:** each writes only its own
   list, so both survive.
 - **A note delete:** the delete wins. A pending reorder is reissued without the
@@ -137,9 +140,11 @@ lists are `project.noteIds`, `note.todayOrder` and `simpleCounter.ids`:
   Without it, competing orders diverge on WebDAV (verified by disabling it).
   While live state may hold an unpersisted change the reissue is deferred and
   the upload holds the crossed order back, so a stale original never uploads.
-  A crossed order without the proof keeps the safety stop. A crossing whose
-  remote row was compacted away is not seen at all: the order uploads as it is
-  and, on SuperSync, the server-rejection path stops as before.
+  A crossed order without the proof keeps the safety stop. Known gap: a held
+  order whose remote row is compacted away before the next sync is no longer
+  seen as crossed and uploads as it is. SuperSync rejects it and stops as
+  before; on a file-based provider receivers that already hold the remote op
+  skip it as superseded, so the holding device keeps its own order.
 
 A habit delete keeps the stop: a habit order fills the slots of the habits it
 lists, so a delete shifts them around an unlisted (disabled) habit and the two

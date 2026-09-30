@@ -228,7 +228,8 @@ export const areCommutingReorderAndContentOperations = (
  * the pending reorder is reissued from current state
  * (`projectReorderConflictAgainstState`) with a clock that dominates both:
  * - a competing reorder of the same list: the list as it stands after the
- *   remote order (either device's order may win, #10264);
+ *   remote order (either device's order may win, #10264). Two habit orders
+ *   must list the same habits;
  * - a note order of the other list (a project's `noteIds` against
  *   `note.todayOrder`): each writes only its own list, so they commute; and
  * - the delete of a note the reorder lists: the delete wins and the reissued
@@ -269,11 +270,17 @@ const isListedDelete = (order: Operation, op: Operation): boolean =>
 export const isReissuedReorderCrossing = (a: Operation, b: Operation): boolean => {
   const listA = reissuedListOf(a);
   const listB = reissuedListOf(b);
-  if (listA && listB)
-    return (
-      a.actionType === b.actionType &&
-      getOpEntityIds(a).some((id) => getOpEntityIds(b).includes(id))
-    );
+  if (listA && listB) {
+    const idsA = getOpEntityIds(a);
+    const idsB = getOpEntityIds(b);
+    // A habit order fills the slots of its own habits: two orders over
+    // different habit sets place them differently on each side.
+    return a.actionType === ActionType.COUNTER_UPDATE_ORDER
+      ? b.actionType === a.actionType &&
+          idsA.length === idsB.length &&
+          idsA.every((id) => idsB.includes(id))
+      : a.actionType === b.actionType && idsA.some((id) => idsB.includes(id));
+  }
   return (!!listA && isListedDelete(a, b)) || (!!listB && isListedDelete(b, a));
 };
 

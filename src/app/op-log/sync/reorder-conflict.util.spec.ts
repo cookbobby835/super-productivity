@@ -604,6 +604,11 @@ describe('reissued reorder crossings (#10377)', () => {
     const other = toOp(updateSimpleCounterOrder({ ids: ['u', 'b', 'a'] }));
     const del = toOp(deleteSimpleCounter({ id: 'a' }));
     expect(isReissuedReorderCrossing(order, other)).toBeTrue();
+    // Different habit sets (a habit added, enabled or disabled on one device)
+    // fill different slots on each side: they keep the stop.
+    const withAdded = toOp(updateSimpleCounterOrder({ ids: ['new', 'b', 'a', 'u'] }));
+    expect(isReissuedReorderCrossing(order, withAdded)).toBeFalse();
+    expect(isReissuedReorderCrossing(withAdded, order)).toBeFalse();
     expect(isReissuedReorderCrossing(order, del)).toBeFalse();
     expect(isReissuedReorderCrossing(del, order)).toBeFalse();
     // The habit order fills the slots of the habits it lists; a delete of a

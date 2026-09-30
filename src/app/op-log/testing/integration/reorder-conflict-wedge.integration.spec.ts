@@ -439,6 +439,12 @@ describe('reorder conflicts: real store, applier, reducers and durable replay (#
       }),
     },
     {
+      // Each order fills the slots of its own habits: they differ per side.
+      name: 'competing habit order over a different habit set',
+      family: 'habits' as const,
+      edit: updateSimpleCounterOrder({ ids: ['other-habit', ...IDS].reverse() }),
+    },
+    {
       name: 'habit deletion',
       family: 'habits' as const,
       edit: deleteSimpleCounter({ id: IDS[0] }),
@@ -679,55 +685,63 @@ describe('reorder conflicts: real store, applier, reducers and durable replay (#
     }
   }
 
-  it('keeps a note added before a crossed project order in every list', async () => {
-    const add = addNote({
-      note: {
-        id: 'added',
-        content: 'added',
-        projectId: PROJECT,
-        created: 100,
-        modified: 100,
-        isPinnedToToday: false,
-      },
-    });
-    const addOp = capture(add, 'local', 1500);
-    const orderAction = noteOrder(['added', ...IDS], 'project');
-    const local = {
-      ...capture(orderAction, 'local', 2000),
-      vectorClock: { ...addOp.vectorClock, local: 2 },
-    };
-    const remote = capture(
-      noteOrder([IDS[1], IDS[2], IDS[0]], 'project'),
-      'remote',
-      1000,
-    );
-    for (const [action, op] of [
-      [add, addOp],
-      [orderAction, local],
-    ] as const) {
-      store.dispatch(action);
-      await db.append(op, 'local');
-    }
-    await TestBed.inject(ConflictResolutionService).autoResolveConflictsLWW([], [remote]);
-    expect(
-      await TestBed.inject(
-        SupersededOperationResolverService,
-      ).reissueCrossedPendingReorders(),
-    ).toEqual({ created: 1, deferredOpIds: [] });
-    const list = (await state()).projects.entities[PROJECT]!.noteIds;
-    expect(list).toContain('added');
+  for (const ordersAdded of [true, false]) {
+    it(`keeps a note added ${ordersAdded ? 'and ordered' : 'after the order'} beside a crossed project order in every list`, async () => {
+      const add = addNote({
+        note: {
+          id: 'added',
+          content: 'added',
+          projectId: PROJECT,
+          created: 100,
+          modified: 100,
+          isPinnedToToday: false,
+        },
+      });
+      const addOp = capture(add, 'local', 1500);
+      const orderAction = noteOrder(
+        ordersAdded ? ['added', ...IDS] : [...IDS],
+        'project',
+      );
+      const local = {
+        ...capture(orderAction, 'local', 2000),
+        vectorClock: { ...addOp.vectorClock, local: 2 },
+      };
+      const remote = capture(
+        noteOrder([IDS[1], IDS[2], IDS[0]], 'project'),
+        'remote',
+        1000,
+      );
+      for (const [action, op] of [
+        [add, addOp],
+        [orderAction, local],
+      ] as const) {
+        store.dispatch(action);
+        await db.append(op, 'local');
+      }
+      await TestBed.inject(ConflictResolutionService).autoResolveConflictsLWW(
+        [],
+        [remote],
+      );
+      expect(
+        await TestBed.inject(
+          SupersededOperationResolverService,
+        ).reissueCrossedPendingReorders(),
+      ).toEqual({ created: 1, deferredOpIds: [] });
+      const list = (await state()).projects.entities[PROJECT]!.noteIds;
+      expect(list).toContain('added');
 
-    // The device that sent `remote` receives the add and the reissue.
-    const reissue = (await db.getUnsynced())
-      .map((row) => row.op)
-      .find((op) => op.actionType === local.actionType)!;
-    resetProjection(initial);
-    await TestBed.inject(OperationApplierService).applyOperations(
-      [remote, addOp, reissue],
-      { isLocalHydration: true },
-    );
-    expect((await state()).projects.entities[PROJECT]!.noteIds).toEqual(list);
-  });
+      // The device that sent `remote` receives the add and the reissue.
+      const reissue = (await db.getUnsynced())
+        .map((row) => row.op)
+        .find((op) => op.actionType === local.actionType)!;
+      resetProjection(initial);
+      await TestBed.inject(OperationApplierService).applyOperations(
+        [remote, addOp, reissue],
+        { isLocalHydration: true },
+      );
+      expect((await state()).projects.entities[PROJECT]!.noteIds).toEqual(list);
+    });
+  }
 
   it('leaves a crossed order pending when compaction removed the proof', async () => {
     const localAction = noteOrder(IDS, 'project');
