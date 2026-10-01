@@ -110,7 +110,10 @@ export const findPatchContentConflicts = (
   payloadKeyFor: (entityType: string) => string,
 ): LwwContentConflict[] =>
   findLwwContentConflicts(patches, payloadKeyFor).flatMap((found) => {
-    const patch = patches.find(({ conflict }) => conflict.entityId === found.entityId);
+    const patch = patches.find(
+      ({ conflict }) =>
+        conflict.entityType === 'TASK' && conflict.entityId === found.entityId,
+    );
     if (!patch) return [];
     const { winner, conflict } = patch;
     const winnerOps = winner === 'remote' ? conflict.remoteOps : conflict.localOps;

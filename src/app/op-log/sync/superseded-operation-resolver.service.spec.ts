@@ -369,8 +369,8 @@ describe('SupersededOperationResolverService', () => {
       supersededOp.actionType = ActionType.TASK_SHARED_UPDATE;
       supersededOp.payload = {
         actionPayload: {
-          task: { id: 'task-1', changes: { title: 'Renamed', dueWithTime: undefined } },
-          clearedFields: ['dueWithTime'],
+          task: { id: 'task-1', changes: { title: 'Renamed', notes: undefined } },
+          clearedFields: ['notes'],
         },
         entityChanges: [],
       };
@@ -387,7 +387,7 @@ describe('SupersededOperationResolverService', () => {
       expect(mockConflictResolutionService.createLWWUpdateOp).toHaveBeenCalledWith(
         'TASK',
         'task-1',
-        { title: 'Renamed', dueWithTime: undefined },
+        { title: 'Renamed', notes: undefined },
         TEST_CLIENT_ID,
         jasmine.any(Object),
         1000,

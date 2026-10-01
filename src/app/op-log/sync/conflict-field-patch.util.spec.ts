@@ -292,7 +292,30 @@ describe('conflict-field-patch.util', () => {
           'task',
           'task-1',
         ),
-      ).toEqual(['title', 'isDone', 'modified']);
+      ).toEqual(['title', 'isDone', 'modified', 'doneOn']);
+    });
+
+    it('keeps the whole entity for a reminder clear, as the conflict path does', () => {
+      for (const field of ['dueWithTime', 'remindAt', 'reminderId', 'deadlineRemindAt']) {
+        expect(
+          supersededPatchFields(
+            [edit({ title: 'a', [field]: undefined })],
+            'TASK' as EntityType,
+            'task',
+            'task-1',
+          ),
+        )
+          .withContext(field)
+          .toBeUndefined();
+      }
+      expect(
+        supersededPatchFields(
+          [edit({ dueWithTime: 5 })],
+          'TASK' as EntityType,
+          'task',
+          'task-1',
+        ),
+      ).toEqual(['dueWithTime']);
     });
 
     it('keeps the whole entity for deltas, opaque ops, LWW rows and types without a fallback', () => {

@@ -327,8 +327,8 @@ holds the rules; `ConflictResolutionService._tryCreateFieldPatch` builds the op.
   concurrent. It carries none of their fields.
 - **Superseded ops:** `SupersededOperationResolverService` re-emits a rejected
   group of readable single-entity edits as a `'patch'` of the fields they
-  wrote, read from current state. LWW rows, deltas and opaque ops keep the
-  whole-entity snapshot (decision 5).
+  wrote, read from current state, with `doneOn` beside `isDone`. LWW rows,
+  deltas, opaque ops and reminder clears keep the whole-entity snapshot.
 - **No echo:** a remote win emits no patch when the local side wrote nothing
   the remote side did not (unless it keeps a delta), and a no-pending crossing
   (#9073) that the remote side won emits nothing; the winner's device
@@ -367,3 +367,14 @@ holds the rules; `ConflictResolutionService._tryCreateFieldPatch` builds the op.
   habit, note and task-tracking pins of #10379 and #10260 stay.
 - **Released resolvers:** a v19.1.0 device that resolves still emits replace
   snapshots; patches take over as clients update.
+- **Asymmetric time rule:** a local delta admits the patch, a remote one
+  refuses it. On SuperSync only the rejected uploader resolves; on a
+  file-based provider two devices can resolve the same conflict, one with a
+  patch and one on the whole-entity path. The rows then meet as opaque LWW
+  rows and converge, but #10379's loss can return in that shape. The
+  both-devices-resolve proof is unit-level only.
+- **Surviving-field echoes:** a field the winning row wrote with the same
+  value as the local op counts as surviving and is re-emitted.
+- **Pinned:** the delta-versus-patch-row divergence and the stale-snapshot
+  restart change are pinned as failing traces (sync-fuzz-pinned-traces.json,
+  ref #10415).

@@ -313,7 +313,15 @@ export const supersededPatchFields = (
   ) {
     return undefined;
   }
-  return Object.keys(mergeChangedFields(ops, payloadKey, entityId));
+  const written = mergeChangedFields(ops, payloadKey, entityId);
+  // As on the conflict path: a reminder clear keeps the whole-entity snapshot
+  // (v18.15.0–v18.21.x ignore `clearedFields`, decision 3), and a done toggle
+  // carries the `doneOn` its reducer derived (`sideChanges`).
+  if (REMINDER_FIELDS.some((field) => field in written && written[field] === undefined)) {
+    return undefined;
+  }
+  const fields = Object.keys(written);
+  return 'isDone' in written && !('doneOn' in written) ? [...fields, 'doneOn'] : fields;
 };
 
 /**
