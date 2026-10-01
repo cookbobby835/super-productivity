@@ -299,6 +299,39 @@ describe('SyncFuzzHarness: negative control', () => {
     }, 60_000);
   }
 
+  it('does not excuse a write the server lost before a stop answered with USE_REMOTE', async () => {
+    // C's rename is uploaded (and acknowledged) before C stops; USE_REMOTE
+    // discards only what C still had unsynced (the unpin), not the rename.
+    const steps: FuzzStep[] = [
+      { d: 'A', a: ['editNote', 'n1', 'isPinnedToToday', true], s: 1 },
+      { d: 'B', s: 1 },
+      { d: 'C', s: 1 },
+      { d: 'C', a: ['renameTask', 't1', 'after'], s: 1 },
+      { d: 'C', a: ['editNote', 'n1', 'isPinnedToToday', false] },
+      { d: 'B', a: ['reorderNotes', 'T', 0, 1], s: 1 },
+      { d: 'C', s: 1, k: 'R' },
+    ];
+    const kept = await runFuzz({ steps, debug: true });
+    const events = kept
+      .dump!.filter((line) => line.startsWith('evt '))
+      .map((line) => JSON.parse(line.slice(4)) as FuzzEvent);
+    expect(events)
+      .withContext(kept.dump!.join('\n'))
+      .toContain({ step: 7, device: 'C', kind: 'stop-dialog', detail: 'USE_REMOTE' });
+    expect(kept.failures.map((f) => f.signature))
+      .withContext(JSON.stringify(kept.failures))
+      .not.toContain('field-reverted:task.title');
+
+    // ...until the server loses the rename while acknowledging it.
+    loseUploadsOf('"after"');
+
+    const { failures } = await runFuzz({ steps });
+
+    expect(failures.map((f) => f.signature))
+      .withContext(JSON.stringify(failures))
+      .toContain('field-reverted:task.title');
+  }, 60_000);
+
   it('leaves a stop unanswered in a trace without a dialog answer or a replacement', async () => {
     const steps = stopThenWrite('L').map(({ k, ...step }) => step);
     const { failures } = await runFuzz({ steps, debug: true });

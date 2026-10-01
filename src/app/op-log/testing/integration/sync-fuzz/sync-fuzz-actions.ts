@@ -74,6 +74,12 @@ export type Intent =
  * multi-entity stop. Keep local data (`L`, USE_LOCAL) or use the remote data
  * (`R`, USE_REMOTE). Without `k` the SYNC_IMPORT dialog is cancelled and
  * fails the run, and a stop stays unanswered.
+ *
+ * `k` also has a trace-wide effect on a replay: a trace with any `k` (or a
+ * replacement intent) models the dialog after a stop, so settle answers
+ * every stop with USE_REMOTE (runFuzz's `modelsStopDialog`). Adding or
+ * dropping the last `k` of a trace therefore changes how settle treats a
+ * stop on any device.
  */
 export interface FuzzStep {
   d: string;

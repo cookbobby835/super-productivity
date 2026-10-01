@@ -334,8 +334,8 @@ export const runFuzz = async (options: FuzzOptions): Promise<FuzzResult> => {
    * Syncs `device`, answering the SYNC_IMPORT conflict dialog with
    * `importAnswer` and the whole-dataset dialog after a stop with
    * `stopAnswer`. USE_REMOTE rebuilds the device from the server's history,
-   * discarding its changes the server never accepted, as both dialogs say:
-   * the ledger excuses those intents. USE_LOCAL after a stop force-uploads
+   * discarding its unsynced changes, as both dialogs say: the ledger excuses
+   * those intents. USE_LOCAL after a stop force-uploads
    * the device's state, a replacement like the force upload intent's: the
    * oracles excuse what it drops through `lastReplacement`.
    */
@@ -356,7 +356,36 @@ export const runFuzz = async (options: FuzzOptions): Promise<FuzzResult> => {
     if (answers.some((e) => e.kind === 'stop-dialog' && e.detail === 'USE_LOCAL')) {
       hasUserReplacement = true;
     }
-    if (!answers.some((e) => e.detail === 'USE_REMOTE')) return;
+    // The whole-dataset dialog's USE_REMOTE drops exactly the ops the device
+    // still had unsynced when it answered (`useRemoteDiscards`): an intent is
+    // excused only if one of its ops was among them, so a write the server
+    // acknowledged and then lost is still checked.
+    const discards = harness.useRemoteDiscards;
+    harness.useRemoteDiscards = undefined;
+    if (discards) {
+      const previous = new Map<string, number>();
+      for (const entry of entries) {
+        if (entry.device !== device.name) continue;
+        const counter = entry.clock[entry.clientId] ?? 0;
+        const after = previous.get(entry.clientId) ?? 0;
+        previous.set(entry.clientId, counter);
+        if (
+          discards.some(
+            (op) =>
+              op.clientId === entry.clientId &&
+              op.counter > after &&
+              op.counter <= counter,
+          )
+        ) {
+          entry.discarded = true;
+        }
+      }
+    }
+    // The SYNC_IMPORT dialog's USE_REMOTE (#10400): the device's intents
+    // beyond the last of its ops the server holds.
+    if (!answers.some((e) => e.kind === 'import-dialog' && e.detail === 'USE_REMOTE')) {
+      return;
+    }
     for (const entry of entries) {
       if (entry.device !== device.name || entry.discarded) continue;
       const accepted = Math.max(
@@ -389,6 +418,17 @@ export const runFuzz = async (options: FuzzOptions): Promise<FuzzResult> => {
     ? options.steps.some((s) => s.a?.[0] === 'forceUpload' || s.a?.[0] === 'importBackup')
     : (options.weights ?? []).some(([kind]) => REPLACEMENT_INTENTS.has(kind));
   const answersImports = (): boolean => replaces || hasUserReplacement;
+  // Which dialogs a run answers, and with what:
+  //
+  //   run                         | SYNC_IMPORT dialog          | dialog after a stop
+  //   ----------------------------|-----------------------------|--------------------
+  //   generated, `replace` mix    | step `k`, settle R          | step `k`, settle R
+  //   generated, other mixes      | after a stop answered L:    | step `k` (own
+  //                               |   step `k`, settle R        |   stream), settle R
+  //   replay with a replacement   | step `k`, settle R          | step `k`, settle R
+  //   replay with `k` only        | after a stop answered L     | step `k`, settle R
+  //   replay without either       | never (fails the run)       | never (stop stays)
+  //
   // A run models the whole-dataset dialog after a stop when it is generated,
   // or replays a trace with a replacement or a dialog answer (`k`). Its steps
   // answer with `k`, and settle with the remote data. A trace without either

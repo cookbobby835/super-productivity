@@ -463,6 +463,12 @@ export class SyncFuzzHarness {
    * Unset, the stop is all that happens, as before the dialog was modeled.
    */
   stopDialogAnswer?: ImportDialogAnswer;
+  /**
+   * The ops a USE_REMOTE answer to the whole-dataset dialog discarded: the
+   * device's unsynced ops right before the rebuild, by client id and own
+   * vector-clock counter. Set by `sync`; the runner reads and clears it.
+   */
+  useRemoteDiscards?: { clientId: string; counter: number }[];
   step = 0;
   private _current?: FuzzDevice;
   private readonly _clock: FuzzClock;
@@ -990,8 +996,8 @@ export class SyncFuzzHarness {
    * with `stopDialogAnswer` as SyncWrapperService._handleDataConflict acts on
    * it, inside the same sync session. A background sync only offers the
    * dialog through a snack whose button runs a user-triggered sync, which
-   * stops again on the same download and opens the dialog; the harness
-   * answers at the first stop. Unset, the dialog stays unanswered: the
+   * opens the dialog if it stops again; the harness answers at the first
+   * stop, so it never sees another device upload in between. Unset, the dialog stays unanswered: the
    * device keeps its stop.
    */
   private async _answerStopDialog(
@@ -1008,8 +1014,13 @@ export class SyncFuzzHarness {
         // pending for the next sync; the pending oracle sees any left over.
         await syncService.forceUploadLocalState(device.client);
       } else {
+        const unsynced = await TestBed.inject(OperationLogStoreService).getUnsynced();
         session.reset();
         await syncService.forceDownloadRemoteState(device.client);
+        this.useRemoteDiscards = unsynced.map(({ op }) => ({
+          clientId: op.clientId,
+          counter: op.vectorClock[op.clientId] ?? 0,
+        }));
         if (session.hasFailed()) {
           this.record(device, 'validation', 'state invalid after use-remote');
         }
