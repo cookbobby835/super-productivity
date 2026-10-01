@@ -184,7 +184,7 @@
   },
   {
     "class": "whole-entity-lww-drops-fields",
-    "ref": "fixed by the field patch PR (regression pin)",
+    "ref": "fixed by #10415 (regression pin)",
     "name": "done status is lost when both devices also rename the task",
     "steps": [
       {
@@ -205,7 +205,7 @@
   },
   {
     "class": "whole-entity-lww-drops-fields",
-    "ref": "fixed by the field patch PR (regression pin)",
+    "ref": "fixed by #10415 (regression pin)",
     "name": "tracked time is lost to a later concurrent rename",
     "steps": [
       {
