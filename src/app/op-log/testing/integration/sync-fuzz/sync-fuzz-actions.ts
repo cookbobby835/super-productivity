@@ -69,9 +69,11 @@ export type Intent =
 /**
  * One step: a device, an optional action, then optional events in this
  * order: sync (`s`), op-log compaction (`c`), restart from the device's
- * database (`r`). `k` answers the SYNC_IMPORT conflict dialog if the step's
- * sync opens it: keep local data (`L`, USE_LOCAL) or use the remote data
- * (`R`, USE_REMOTE). Without `k` the dialog is cancelled and fails the run.
+ * database (`r`). `k` answers the dialog the step's sync opens: the
+ * SYNC_IMPORT conflict dialog, or the whole-dataset conflict dialog after a
+ * multi-entity stop. Keep local data (`L`, USE_LOCAL) or use the remote data
+ * (`R`, USE_REMOTE). Without `k` the SYNC_IMPORT dialog is cancelled and
+ * fails the run, and a stop stays unanswered.
  */
 export interface FuzzStep {
   d: string;
