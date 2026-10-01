@@ -7,7 +7,7 @@ import { FuzzDevice, SyncFuzzHarness } from './sync-fuzz-harness';
  * Pins TODAY's outcome of a three-device shape the fuzz oracles cannot see
  * (they only check that a converged value is one of the writes), like the
  * failing traces in sync-fuzz-pinned-traces.json. Second review of #10415,
- * finding 1; a decision is pending on #10393.
+ * finding 1; accepted as a residual on #10393, follow-up #10422.
  *
  * A writes notes, then renames, offline. C writes newer notes, offline. B
  * renames last and syncs. A resolves its title conflict with B as a remote
@@ -16,10 +16,12 @@ import { FuzzDevice, SyncFuzzHarness } from './sync-fuzz-harness';
  * - master: C's newer notes win, but A's notes edit is lost (#10260 shape).
  * - stamping the patch with A's own time instead: C's notes beat the patch
  *   row, whose content C cannot read, so C wins whole-entity with a snapshot
- *   read before the batch, and both renames are lost on every device.
+ *   read before the batch (#10421): both renames are lost on A and B, and C
+ *   diverges.
  *
  * The cause is the side-level winner plus opaque resolution rows; a fix needs
- * per-field times or a readable re-send. Update this pin when that lands.
+ * #10421, then a readable re-send with a per-field winner (#10422). Update
+ * this pin when that lands.
  */
 describe('field patch: a remote win’s timestamp (known current behavior)', () => {
   let harness: SyncFuzzHarness;

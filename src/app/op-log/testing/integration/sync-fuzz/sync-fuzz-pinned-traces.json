@@ -1013,7 +1013,7 @@
   },
   {
     "class": "remote-win-keeps-local-edit",
-    "ref": "#10415 residual 1 (#10408 for rows): a pending delta that loses to a resolution patch row stays on its device",
+    "ref": "#10415 residual 1, follow-up #10408 (notes: #10423): a pending delta that loses to a resolution patch row stays on its device",
     "name": "a tracked delta that loses to a field-patch row stays on its device only",
     "steps": [
       {
@@ -1046,7 +1046,7 @@
   },
   {
     "class": "restart-changes-state",
-    "ref": "#10415 residual 2: a kept delta reaches the local-win fold, which hoists a done toggle ahead of a stale snapshot",
+    "ref": "#10421 (#10415 residual 2): a kept delta reaches the local-win fold, which hoists a done toggle ahead of a stale snapshot",
     "name": "a done toggle hoisted ahead of a stale local-win snapshot changes on restart",
     "steps": [
       {

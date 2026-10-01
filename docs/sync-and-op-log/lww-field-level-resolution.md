@@ -362,7 +362,9 @@ holds the rules; `ConflictResolutionService._tryCreateFieldPatch` builds the op.
 - **A time delta that loses to a resolution row** is rejected, as on master
   (#10408 keeps such deltas only against readable winners). A replace row
   wiped the device's time too; a patch row leaves it there, so the time is
-  still lost for the other devices but the losing device diverges.
+  still lost for the other devices but the losing device diverges. Follow-up:
+  keep the delta when the row writes no time key (#10408). The notes
+  divergence in the same pinned trace is older than PR 1 (#10423).
 - **Opaque ops, NOTE, deletes and archives** keep whole-entity LWW, so the
   habit, note and task-tracking pins of #10379 and #10260 stay.
 - **Released resolvers:** a v19.1.0 device that resolves still emits replace
@@ -381,12 +383,27 @@ holds the rules; `ConflictResolutionService._tryCreateFieldPatch` builds the op.
   and they beat a third device's newer edit of such a field (pinned in
   `field-patch-timestamp.integration.spec.ts`). Stamping the patch with the
   loser's time instead lets that third device beat the opaque row and win
-  whole-entity with a stale snapshot, which loses more. A fix needs per-field
-  times or a readable re-send; disjoint merges have had the same property.
+  whole-entity with a stale snapshot: the renames are lost on two devices and
+  the third diverges. A fix needs #10421 first, then a readable re-send with
+  a per-field winner (#10422); disjoint merges have had the same property.
+- **Stale local-win snapshot:** kept deltas upload on their own, so a third
+  device's local-win replace folds them more often. The fold hoists an
+  incoming non-plain edit (a done toggle) ahead of the snapshot, which was read
+  before the batch, so replay and the other devices revert it (#10421).
 - **A winner that also tracks time:** a remote `syncTimeSpent` refuses the
   patch, so #10260 stays for a task renamed while another device times it.
 - **Undone toggles:** the `doneOn` clear beside `isDone: false` travels in
   `clearedFields`, which v18.15.0–v18.21.x ignore (stale `doneOn` there).
 - **Pinned:** the delta-versus-patch-row divergence, the stale-snapshot
   restart change and the tracked-winner shape are pinned as failing traces
-  (sync-fuzz-pinned-traces.json, ref #10415).
+  (sync-fuzz-pinned-traces.json; refs #10408, #10421, #10260).
+
+**Residual decisions (2026-10-01).** @johannesjo, after the residuals were
+put to him: "Double check decisions in sub agents then do everything as
+recommended (and file the follow up of it makes sense)". So:
+
+- the delta-versus-patch-row divergence and the stale-snapshot restart change
+  are accepted as pinned residuals, with follow-ups #10408 and #10421;
+- `survivingLocalFields` stays, since it reads no row payload (decision 5);
+- the remote win's timestamp is accepted as pinned, with follow-up #10422,
+  which waits on #10421.
