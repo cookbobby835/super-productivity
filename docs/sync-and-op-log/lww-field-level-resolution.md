@@ -298,4 +298,7 @@ Decided by @johannesjo on 2026-09-30 ([#10393](https://github.com/super-producti
 4. **NOTE:** not admitted until v19.1.0 has left the fleet.
 5. **Resolution ops as input:** no; the no-re-merge contract stays.
 6. **Opaque ops:** stay on whole-entity LWW.
-7. **Time on a remote win:** local-win direction only, for now.
+7. **Time on a remote win:** reopened as #10408 after the review of #10398.
+   A local time delta that commutes with the remote winner (the winner
+   writes no time field) now stays pending and is rebased, instead of being
+   rejected. A winner that writes time still wins.
