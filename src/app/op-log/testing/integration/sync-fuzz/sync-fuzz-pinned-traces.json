@@ -1091,5 +1091,52 @@
       "restart-changed:.task.entities.*.notes"
     ],
     "rejections": []
+  },
+  {
+    "class": "remote-win-keeps-local-edit",
+    "ref": "#10260: a winning side that also tracks time refuses the field patch (#10415 residual; #10408)",
+    "name": "a done toggle that loses a rename crossing to a device that also tracked the task stays on its device only",
+    "steps": [
+      {
+        "d": "A",
+        "a": ["doneTask", "t2", true]
+      },
+      {
+        "d": "A",
+        "a": ["renameTask", "t2", "A1"]
+      },
+      {
+        "d": "B",
+        "a": ["editTaskNotes", "t2", "B2"]
+      },
+      {
+        "d": "B",
+        "a": ["renameTask", "t2", "B3"]
+      },
+      {
+        "d": "C",
+        "a": ["track", "t2", 2000]
+      },
+      {
+        "d": "C",
+        "a": ["renameTask", "t2", "C4"],
+        "s": 1
+      },
+      {
+        "d": "B",
+        "s": 1
+      },
+      {
+        "d": "A",
+        "s": 1
+      }
+    ],
+    "primary": "divergence:.task.entities.*.isDone",
+    "signatures": [
+      "divergence:.task.entities.*.doneOn",
+      "divergence:.task.entities.*.isDone",
+      "field-reverted:task.isDone"
+    ],
+    "rejections": []
   }
 ]

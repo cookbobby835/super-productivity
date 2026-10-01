@@ -375,6 +375,18 @@ holds the rules; `ConflictResolutionService._tryCreateFieldPatch` builds the op.
   both-devices-resolve proof is unit-level only.
 - **Surviving-field echoes:** a field the winning row wrote with the same
   value as the local op counts as surviving and is re-emitted.
-- **Pinned:** the delta-versus-patch-row divergence and the stale-snapshot
-  restart change are pinned as failing traces (sync-fuzz-pinned-traces.json,
-  ref #10415).
+- **Side-level winner on a remote win:** a field both sides wrote takes the
+  winning side's value, and the patch carries the winning side's timestamp.
+  So a remote win re-sends the loser's own older fields at the winner's time,
+  and they beat a third device's newer edit of such a field (pinned in
+  `field-patch-timestamp.integration.spec.ts`). Stamping the patch with the
+  loser's time instead lets that third device beat the opaque row and win
+  whole-entity with a stale snapshot, which loses more. A fix needs per-field
+  times or a readable re-send; disjoint merges have had the same property.
+- **A winner that also tracks time:** a remote `syncTimeSpent` refuses the
+  patch, so #10260 stays for a task renamed while another device times it.
+- **Undone toggles:** the `doneOn` clear beside `isDone: false` travels in
+  `clearedFields`, which v18.15.0–v18.21.x ignore (stale `doneOn` there).
+- **Pinned:** the delta-versus-patch-row divergence, the stale-snapshot
+  restart change and the tracked-winner shape are pinned as failing traces
+  (sync-fuzz-pinned-traces.json, ref #10415).
