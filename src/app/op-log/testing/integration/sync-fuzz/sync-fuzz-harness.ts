@@ -464,9 +464,10 @@ export class SyncFuzzHarness {
    */
   stopDialogAnswer?: ImportDialogAnswer;
   /**
-   * The ops a USE_REMOTE answer to the whole-dataset dialog discarded: the
-   * device's unsynced ops right before the rebuild, by client id and own
-   * vector-clock counter. Set by `sync`; the runner reads and clears it.
+   * The ops a USE_REMOTE answer discarded, in either dialog: the device's
+   * unsynced ops right before each successful rebuild
+   * (OperationLogSyncService.forceDownloadRemoteState), by client id and own
+   * vector-clock counter. The runner reads and clears it after every sync.
    */
   useRemoteDiscards?: { clientId: string; counter: number }[];
   step = 0;
@@ -683,6 +684,7 @@ export class SyncFuzzHarness {
       TestBed.inject(OperationLogCompactionService),
       'compactIfBloated',
     );
+    this._recordUseRemoteDiscards();
     // Every device starts on the fuzz day, as setStartOfNextDayDiffOnLoad
     // sets it after loadAllData; the store's initial todayStr is the real
     // date when the bundle loaded.
@@ -843,6 +845,27 @@ export class SyncFuzzHarness {
     return firstValueFrom(TestBed.inject(Store)) as Promise<Record<string, unknown>>;
   }
 
+  /**
+   * Both dialogs' USE_REMOTE rebuild through forceDownloadRemoteState, which
+   * drops every unsynced op of the device (the non-resume path keeps none):
+   * record them once the rebuild succeeds.
+   */
+  private _recordUseRemoteDiscards(): void {
+    const syncService = TestBed.inject(OperationLogSyncService);
+    const original = syncService.forceDownloadRemoteState.bind(syncService);
+    syncService.forceDownloadRemoteState = async (...args) => {
+      const unsynced = await TestBed.inject(OperationLogStoreService).getUnsynced();
+      await original(...args);
+      this.useRemoteDiscards = [
+        ...(this.useRemoteDiscards ?? []),
+        ...unsynced.map(({ op }) => ({
+          clientId: op.clientId,
+          counter: op.vectorClock[op.clientId] ?? 0,
+        })),
+      ];
+    };
+  }
+
   private readonly _inFlight = new Set<Promise<unknown>>();
 
   private _trackInFlight<T extends object>(instance: T, method: keyof T & string): void {
@@ -997,8 +1020,8 @@ export class SyncFuzzHarness {
    * it, inside the same sync session. A background sync only offers the
    * dialog through a snack whose button runs a user-triggered sync, which
    * opens the dialog if it stops again; the harness answers at the first
-   * stop, so it never sees another device upload in between. Unset, the dialog stays unanswered: the
-   * device keeps its stop.
+   * stop, so it never sees another device upload in between. Unset, the
+   * dialog stays unanswered: the device keeps its stop.
    */
   private async _answerStopDialog(
     device: FuzzDevice,
@@ -1014,13 +1037,8 @@ export class SyncFuzzHarness {
         // pending for the next sync; the pending oracle sees any left over.
         await syncService.forceUploadLocalState(device.client);
       } else {
-        const unsynced = await TestBed.inject(OperationLogStoreService).getUnsynced();
         session.reset();
         await syncService.forceDownloadRemoteState(device.client);
-        this.useRemoteDiscards = unsynced.map(({ op }) => ({
-          clientId: op.clientId,
-          counter: op.vectorClock[op.clientId] ?? 0,
-        }));
         if (session.hasFailed()) {
           this.record(device, 'validation', 'state invalid after use-remote');
         }

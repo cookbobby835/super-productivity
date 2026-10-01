@@ -332,6 +332,41 @@ describe('SyncFuzzHarness: negative control', () => {
       .toContain('field-reverted:task.title');
   }, 60_000);
 
+  it('excuses a write dropped by a second stop answered with USE_REMOTE', async () => {
+    // C stops twice and answers USE_REMOTE both times. Its rebuild resets
+    // its own counter, so the rename after the first rebuild reuses a
+    // discarded counter; the second USE_REMOTE drops that unsynced rename
+    // by design, which must not read as a lost write.
+    const stop: FuzzStep[] = [
+      { d: 'C', a: ['editNote', 'n1', 'isPinnedToToday', false] },
+      { d: 'B', a: ['reorderNotes', 'T', 0, 1], s: 1 },
+    ];
+    const steps: FuzzStep[] = [
+      { d: 'A', a: ['editNote', 'n1', 'isPinnedToToday', true], s: 1 },
+      { d: 'B', s: 1 },
+      { d: 'C', s: 1 },
+      { d: 'C', a: ['renameTask', 't1', 'one'] },
+      ...stop,
+      { d: 'C', s: 1, k: 'R' },
+      { d: 'C', a: ['renameTask', 't1', 'two'] },
+      ...stop,
+      { d: 'C', s: 1, k: 'R' },
+    ];
+    const { failures, dump } = await runFuzz({ steps, debug: true });
+    const answers = dump!
+      .filter((line) => line.startsWith('evt '))
+      .map((line) => JSON.parse(line.slice(4)) as FuzzEvent)
+      .filter((e) => e.kind === 'stop-dialog');
+    expect(answers.map((e) => `${e.step} ${e.device} ${e.detail}`))
+      .withContext(dump!.join('\n'))
+      .toEqual(['7 C USE_REMOTE', '11 C USE_REMOTE']);
+    const signatures = failures.map((f) => f.signature);
+    expect(signatures).withContext(JSON.stringify(failures)).toContain(STOP);
+    expect(signatures)
+      .withContext(JSON.stringify(failures))
+      .not.toContain('field-reverted:task.title');
+  }, 60_000);
+
   it('leaves a stop unanswered in a trace without a dialog answer or a replacement', async () => {
     const steps = stopThenWrite('L').map(({ k, ...step }) => step);
     const { failures } = await runFuzz({ steps, debug: true });

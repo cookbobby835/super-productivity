@@ -118,7 +118,9 @@ interface LedgerEntry {
   device: string;
   clientId: string;
   clock: VectorClock;
-  /** Its device answered USE_REMOTE before the server accepted it. */
+  /** The device's own counter before the intent: its ops are above it. */
+  counterBefore: number;
+  /** One of its ops was still unsynced when its device answered USE_REMOTE. */
   discarded?: boolean;
 }
 
@@ -313,17 +315,26 @@ export const runFuzz = async (options: FuzzOptions): Promise<FuzzResult> => {
     }
   };
   const entries: LedgerEntry[] = [];
-  const note = async (intent: Intent, writes: FuzzWrite[]): Promise<void> => {
+  const ownClock = async (): Promise<VectorClock> =>
+    (await TestBed.inject(OperationLogStoreService).getVectorClock()) ?? {};
+  /** Runs the intent on the current device and records it in the ledger. */
+  const executeAndNote = async (intent: Intent): Promise<FuzzWrite[] | undefined> => {
+    const before = await ownClock();
+    const writes = await executeIntent(harness, intent);
+    if (!writes) return undefined;
     const device = harness.current!;
-    const clock = (await TestBed.inject(OperationLogStoreService).getVectorClock()) ?? {};
     entries.push({
       intent,
       writes,
       device: device.name,
       clientId: device.clientId,
-      clock,
+      clock: await ownClock(),
+      counterBefore: before[device.clientId] ?? 0,
     });
+    return writes;
   };
+  /** Per device, the ledger length at its last USE_REMOTE rebuild. */
+  const rebuiltAt = new Map<string, number>();
   /**
    * Whether a stop has been answered with USE_LOCAL: its force upload is a
    * user's replacement, so from then on the SYNC_IMPORT dialog it opens on
@@ -350,52 +361,36 @@ export const runFuzz = async (options: FuzzOptions): Promise<FuzzResult> => {
     await harness.sync(device);
     harness.importDialogAnswer = undefined;
     harness.stopDialogAnswer = undefined;
-    const answers = harness.events
+    const answeredLocal = harness.events
       .slice(before)
-      .filter((e) => e.kind === 'import-dialog' || e.kind === 'stop-dialog');
-    if (answers.some((e) => e.kind === 'stop-dialog' && e.detail === 'USE_LOCAL')) {
-      hasUserReplacement = true;
-    }
-    // The whole-dataset dialog's USE_REMOTE drops exactly the ops the device
-    // still had unsynced when it answered (`useRemoteDiscards`): an intent is
-    // excused only if one of its ops was among them, so a write the server
-    // acknowledged and then lost is still checked.
+      .some((e) => e.kind === 'stop-dialog' && e.detail === 'USE_LOCAL');
+    if (answeredLocal) hasUserReplacement = true;
+    // USE_REMOTE (either dialog) drops exactly the ops the device still had
+    // unsynced when it answered (`useRemoteDiscards`): an intent is excused
+    // only if one of its ops was among them, so a write the server
+    // acknowledged and then lost is still checked. A rebuild resets the
+    // device's own counter to what the server knows, so later intents can
+    // reuse the counters of discarded ones: only the intents since the
+    // device's previous rebuild are matched.
     const discards = harness.useRemoteDiscards;
     harness.useRemoteDiscards = undefined;
-    if (discards) {
-      const previous = new Map<string, number>();
-      for (const entry of entries) {
-        if (entry.device !== device.name) continue;
-        const counter = entry.clock[entry.clientId] ?? 0;
-        const after = previous.get(entry.clientId) ?? 0;
-        previous.set(entry.clientId, counter);
-        if (
-          discards.some(
-            (op) =>
-              op.clientId === entry.clientId &&
-              op.counter > after &&
-              op.counter <= counter,
-          )
-        ) {
-          entry.discarded = true;
-        }
+    if (!discards) return;
+    for (let i = rebuiltAt.get(device.name) ?? 0; i < entries.length; i++) {
+      const entry = entries[i];
+      if (entry.device !== device.name || entry.discarded) continue;
+      const counter = entry.clock[entry.clientId] ?? 0;
+      if (
+        discards.some(
+          (op) =>
+            op.clientId === entry.clientId &&
+            op.counter > entry.counterBefore &&
+            op.counter <= counter,
+        )
+      ) {
+        entry.discarded = true;
       }
     }
-    // The SYNC_IMPORT dialog's USE_REMOTE (#10400): the device's intents
-    // beyond the last of its ops the server holds.
-    if (!answers.some((e) => e.kind === 'import-dialog' && e.detail === 'USE_REMOTE')) {
-      return;
-    }
-    for (const entry of entries) {
-      if (entry.device !== device.name || entry.discarded) continue;
-      const accepted = Math.max(
-        0,
-        ...harness.server.rows
-          .filter((row) => row.op.clientId === entry.clientId)
-          .map((row) => row.op.vectorClock[entry.clientId] ?? 0),
-      );
-      if ((entry.clock[entry.clientId] ?? 0) > accepted) entry.discarded = true;
-    }
+    rebuiltAt.set(device.name, entries.length);
   };
   const devices = new Map<string, FuzzDevice>();
   for (const name of DEVICES) devices.set(name, await harness.addDevice(name));
@@ -404,7 +399,7 @@ export const runFuzz = async (options: FuzzOptions): Promise<FuzzResult> => {
   // Setup: A creates the shared entities, then every device joins.
   await harness.as(deviceOf('A'), async () => {
     for (const intent of SETUP_INTENTS) {
-      await note(intent, (await executeIntent(harness, intent)) ?? []);
+      await executeAndNote(intent);
     }
   });
   for (const name of DEVICES) await sync(deviceOf(name));
@@ -444,11 +439,7 @@ export const runFuzz = async (options: FuzzOptions): Promise<FuzzResult> => {
     let applied: Intent | undefined;
     if (intent) {
       await harness.as(device, async () => {
-        const writes = await executeIntent(harness, intent);
-        if (writes) {
-          await note(intent, writes);
-          applied = intent;
-        }
+        if (await executeAndNote(intent)) applied = intent;
       });
     }
     if (step.s) {
