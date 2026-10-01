@@ -37,6 +37,13 @@ import { waitForAppReady } from '../../utils/waits';
  *   npm run e2e:supersync:file e2e/tests/sync/supersync-use-remote-app-features-10399.spec.ts -- --retries=0
  */
 
+const CRASH_STATE_KEY = 'e2e-10399-crash-state';
+const CRASH_LOG = '[CrashResume] Simulating reload after remote baseline commit';
+const REBUILD_COMMITTED_LOG =
+  'OperationLogSyncService: Replaced local persistence with remote baseline.';
+const RESUME_DETECTED_LOG =
+  'OperationLogSyncService: Interrupted USE_REMOTE rebuild detected';
+
 /** The features NEW_INSTALL_APP_FEATURES turns off, by their side-nav label. */
 const HIDDEN_NAV_ITEMS = ['Schedule', 'Boards', 'Habits'];
 
@@ -251,6 +258,112 @@ test.describe('@supersync #10399 "use remote" keeps the app features through a r
       }
     });
   }
+
+  // The crash failpoint of supersync-use-remote-crash-resume.spec.ts: B reloads
+  // right after the baseline commits, so the reload hydrates that baseline and
+  // the resume rebuilds from it. Red without the fix already after the reload.
+  test('crash after the baseline commits: reload, resume, then restart', async ({
+    browser,
+    baseURL,
+    testRunId,
+  }) => {
+    test.setTimeout(240000);
+    const clients: SimulatedE2EClient[] = [];
+    const backupPath = writeBackupFixture(testRunId, NEW_INSTALL_APP_FEATURES_OFF);
+    try {
+      const syncConfig = getSuperSyncConfig(await createTestUser(testRunId));
+      const remoteTask = `Remote-10399-${testRunId}`;
+
+      const clientA = await createClient(browser, baseURL!, 'A', testRunId, syncConfig);
+      clients.push(clientA);
+      await clientA.workView.waitForTaskList();
+      await clientA.sync.setupSuperSync(unencryptedSetup(syncConfig));
+      await clientA.workView.addTask(remoteTask);
+      await clientA.sync.syncAndWait();
+
+      const clientB = await createClient(browser, baseURL!, 'B', testRunId, syncConfig);
+      clients.push(clientB);
+      await clientB.page.addInitScript(
+        ({ crashLog, crashStateKey, rebuildCommittedLog }) => {
+          const e2eGlobal = globalThis as typeof globalThis & {
+            __SP_E2E_BLOCK_AUTO_SYNC?: boolean;
+            __SP_E2E_BLOCK_IMMEDIATE_UPLOAD?: boolean;
+            __SP_E2E_BLOCK_WS_DOWNLOAD?: boolean;
+          };
+          e2eGlobal.__SP_E2E_BLOCK_AUTO_SYNC =
+            sessionStorage.getItem(crashStateKey) === 'crashed';
+          e2eGlobal.__SP_E2E_BLOCK_IMMEDIATE_UPLOAD = true;
+          e2eGlobal.__SP_E2E_BLOCK_WS_DOWNLOAD = true;
+          const originalLog = console.log.bind(console);
+          console.log = (...args: unknown[]): void => {
+            originalLog(...args);
+            if (
+              sessionStorage.getItem(crashStateKey) === 'armed' &&
+              args.map(String).join(' ').includes(rebuildCommittedLog)
+            ) {
+              sessionStorage.setItem(crashStateKey, 'crashed');
+              originalLog(crashLog);
+              throw new Error(crashLog);
+            }
+          };
+        },
+        {
+          crashLog: CRASH_LOG,
+          crashStateKey: CRASH_STATE_KEY,
+          rebuildCommittedLog: REBUILD_COMMITTED_LOG,
+        },
+      );
+      await clientB.page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+      await waitForAppReady(clientB.page);
+
+      const importPage = new ImportPage(clientB.page);
+      await importPage.navigateToImportPage();
+      await importPage.importBackupFile(backupPath);
+      await clientB.page.goto('/#/tag/TODAY/tasks');
+      await clientB.page.evaluate(
+        (key) => sessionStorage.setItem(key, 'armed'),
+        CRASH_STATE_KEY,
+      );
+      await clientB.sync.setupSuperSync(unencryptedSetup(syncConfig, false));
+      await expect(clientB.sync.syncImportConflictDialog).toBeVisible({
+        timeout: 30000,
+      });
+
+      const crashObserved = clientB.page.waitForEvent('console', {
+        predicate: (message) => message.text().includes(CRASH_LOG),
+        timeout: 30000,
+      });
+      await clientB.sync.chooseSyncImportUseRemote();
+      await crashObserved;
+      await clientB.page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+      await waitForAppReady(clientB.page);
+      expect(
+        await clientB.page.evaluate(
+          (key) => sessionStorage.getItem(key),
+          CRASH_STATE_KEY,
+        ),
+      ).toBe('crashed');
+      await expectNewInstallFeatures(clientB.page, 'B after crash reload');
+
+      const resumeDetected = clientB.page.waitForEvent('console', {
+        predicate: (message) => message.text().includes(RESUME_DETECTED_LOG),
+        timeout: 30000,
+      });
+      await clientB.sync.syncAndWait({ timeout: 60000 });
+      await resumeDetected;
+      await waitForTask(clientB.page, remoteTask);
+      await expectNewInstallFeatures(clientB.page, 'B after resume');
+
+      await restart(clientB.page);
+      await waitForTask(clientB.page, remoteTask);
+      await expectNewInstallFeatures(clientB.page, 'B after restart');
+    } finally {
+      for (const client of clients) {
+        await closeClient(client);
+      }
+      fs.rmSync(backupPath, { force: true });
+    }
+  });
 
   // Passes without the fix too: both devices set up sync concurrently, and the
   // resulting [GLOBAL_CONFIG] LWW Update carries the winner's whole config,
