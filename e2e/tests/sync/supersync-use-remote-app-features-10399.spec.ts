@@ -21,14 +21,14 @@ import { waitForAppReady } from '../../utils/waits';
 /**
  * #10399: "use remote data" on SuperSync rebuilds the device from the server
  * history (forceDownloadRemoteState). With no appFeatures config op in that
- * history, the rebuilt device must end up with the same app features as a
- * fresh install joining the account: the calm new-install set (#10361). That
- * holds before AND after a restart, and a later backup (a full-state op) must
- * not carry every feature switched on.
+ * history, the rebuilt device keeps the app features it shows, before AND after
+ * a restart, and a later backup (a full-state op) carries the same: the calm
+ * new-install set (#10361) for a device that had it, every feature for a device
+ * that had every feature, like every install from before #10361.
  *
  * Before the fix the persisted rebuild baseline carried DEFAULT_GLOBAL_CONFIG's
- * all-on appFeatures while the live store kept its own: a restart switched every
- * feature on, and a restored backup's features stayed until that restart.
+ * all-on appFeatures while the live store kept its own, so a restart switched
+ * every feature on for a device with the new-install set.
  *
  * All clients start with the new-install feature set (`isNewInstallAppFeatures`),
  * unlike the rest of the E2E suite.
@@ -91,7 +91,13 @@ const expectNoFullStateOp = async (page: Page): Promise<void> => {
   expect(opTypes.filter(isFullStateOpType)).toEqual([]);
 };
 
-const expectNewInstallFeatures = async (page: Page, context: string): Promise<void> => {
+type FeatureSet = 'new-install' | 'all-on';
+
+const expectFeatures = async (
+  page: Page,
+  features: FeatureSet,
+  context: string,
+): Promise<void> => {
   const sideNav = page.locator('magic-side-nav');
   await expect(sideNav.getByText('Planner', { exact: true }), context).toBeVisible({
     timeout: 15000,
@@ -100,9 +106,12 @@ const expectNewInstallFeatures = async (page: Page, context: string): Promise<vo
     await expect(
       sideNav.getByText(label, { exact: true }),
       `${context}: ${label}`,
-    ).toHaveCount(0);
+    ).toHaveCount(features === 'new-install' ? 0 : 1);
   }
 };
+
+const expectNewInstallFeatures = (page: Page, context: string): Promise<void> =>
+  expectFeatures(page, 'new-install', context);
 
 const restart = async (page: Page): Promise<void> => {
   await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
@@ -163,7 +172,10 @@ const expectFreshInstallMatches = async (
   await expectNewInstallFeatures(fresh.page, 'fresh install');
 };
 
-test.describe('@supersync #10399 "use remote" keeps the new-install app features', () => {
+test.describe('@supersync #10399 "use remote" keeps the app features through a restart', () => {
+  // Red without the fix: new-install (the restart turns every feature on).
+  // all-on passes without it too and pins that a device with every feature
+  // keeps them, rather than taking the new-install set from the rebuild.
   for (const backupFeatures of ['new-install', 'all-on'] as const) {
     test(`SYNC_IMPORT dialog, backup with ${backupFeatures} features: use remote, then restart`, async ({
       browser,
@@ -205,25 +217,32 @@ test.describe('@supersync #10399 "use remote" keeps the new-install app features
         await clientB.sync.syncAndWait();
         await expectNoFullStateOp(clientB.page);
 
-        // The server history has no appFeatures op: B now matches a fresh install.
-        await expectNewInstallFeatures(clientB.page, 'B after use remote');
+        // The server history has no appFeatures op: B keeps what it shows.
+        await expectFeatures(clientB.page, backupFeatures, 'B after use remote');
         await restart(clientB.page);
         await waitForTask(clientB.page, remoteTask);
-        await expectNewInstallFeatures(clientB.page, 'B after restart');
-        expect(await exportedAppFeatures(clientB.page)).toEqual(
-          expect.objectContaining(NEW_INSTALL_APP_FEATURES_OFF),
-        );
+        await expectFeatures(clientB.page, backupFeatures, 'B after restart');
+        const exported = await exportedAppFeatures(clientB.page);
+        for (const [key, isOffForNewInstall] of Object.entries(
+          NEW_INSTALL_APP_FEATURES_OFF,
+        )) {
+          expect(exported[key], `exported ${key}`).toBe(
+            backupFeatures === 'new-install' ? isOffForNewInstall : true,
+          );
+        }
 
         await clientA.sync.syncAndWait();
         await expectNewInstallFeatures(clientA.page, 'A after B synced');
-        await expectFreshInstallMatches(
-          browser,
-          baseURL!,
-          testRunId,
-          syncConfig,
-          remoteTask,
-          clients,
-        );
+        if (backupFeatures === 'new-install') {
+          await expectFreshInstallMatches(
+            browser,
+            baseURL!,
+            testRunId,
+            syncConfig,
+            remoteTask,
+            clients,
+          );
+        }
       } finally {
         for (const client of clients) {
           await closeClient(client);

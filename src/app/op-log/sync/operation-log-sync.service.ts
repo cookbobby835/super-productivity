@@ -76,7 +76,7 @@ import { ValidateStateService } from '../validation/validate-state.service';
 import { extractEntityKeysFromState } from '../persistence/extract-entity-keys';
 import { firstValueFrom } from 'rxjs';
 import {
-  selectConfigFeatureState,
+  selectAppFeaturesConfig,
   selectSyncConfig,
 } from '../../features/config/store/global-config.reducer';
 import { buildRemoteRebuildBaselineState } from './remote-rebuild-baseline.util';
@@ -1923,6 +1923,7 @@ export class OperationLogSyncService {
     const baselineState = buildRemoteRebuildBaselineState(
       baselineSource,
       localOnlySyncSettings,
+      await firstValueFrom(this.store.select(selectAppFeaturesConfig)),
     );
     const archiveYoung =
       (snapshotState?.[
@@ -2091,20 +2092,11 @@ export class OperationLogSyncService {
           // Reset live state to defaults, then replay the COMPLETE server history on
           // top. A full-state op in the history replaces state again by its own
           // semantics; a purely incremental history rebuilds from this baseline.
-          // Without globalConfig, loadAllData keeps the live config; its
-          // appFeatures must still match the persisted baseline (#10399).
-          const liveConfig = await firstValueFrom(
-            this.store.select(selectConfigFeatureState),
-          );
           this.store.dispatch(
             loadAllData({
-              appDataComplete: {
-                ...defaultData,
-                globalConfig: {
-                  ...liveConfig,
-                  appFeatures: baselineState.globalConfig.appFeatures,
-                },
-              } as Parameters<typeof loadAllData>[0]['appDataComplete'],
+              appDataComplete: defaultData as Parameters<
+                typeof loadAllData
+              >[0]['appDataComplete'],
             }),
           );
           // Brief yield to let NgRx process the state reset

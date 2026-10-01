@@ -1,5 +1,4 @@
 import { DEFAULT_GLOBAL_CONFIG } from '../../features/config/default-global-config.const';
-import { LS } from '../../core/persistence/storage-keys.const';
 import { NEW_INSTALL_APP_FEATURES } from '../../features/config/new-install-app-features.const';
 import { SyncProviderId } from '../sync-providers/provider.const';
 import { buildRemoteRebuildBaselineState } from './remote-rebuild-baseline.util';
@@ -13,22 +12,11 @@ describe('buildRemoteRebuildBaselineState', () => {
     isManualSyncOnly: true,
   };
 
-  let skipTourValue: string | null;
-  beforeEach(() => {
-    // getInitialAppFeatures() keeps every feature on for E2E runs that set this.
-    skipTourValue = localStorage.getItem(LS.IS_SKIP_TOUR);
-    localStorage.removeItem(LS.IS_SKIP_TOUR);
-  });
-  afterEach(() => {
-    if (skipTourValue !== null) {
-      localStorage.setItem(LS.IS_SKIP_TOUR, skipTourValue);
-    }
-  });
-
-  it('starts a history without a snapshot from the new-install app features (#10399)', () => {
+  it("starts a history without a snapshot from the device's own app features (#10399)", () => {
     const baseline = buildRemoteRebuildBaselineState(
       { task: { ids: [], entities: {} } },
       localOnlySyncSettings,
+      NEW_INSTALL_APP_FEATURES,
     );
 
     expect(baseline.globalConfig.appFeatures).toEqual(NEW_INSTALL_APP_FEATURES);
@@ -36,7 +24,7 @@ describe('buildRemoteRebuildBaselineState', () => {
     expect(baseline['task']).toEqual({ ids: [], entities: {} });
   });
 
-  it("keeps a snapshot's own appFeatures", () => {
+  it("keeps a snapshot's own appFeatures over the device's", () => {
     const snapshotAppFeatures = {
       ...DEFAULT_GLOBAL_CONFIG.appFeatures,
       isBoardsEnabled: true,
@@ -46,6 +34,7 @@ describe('buildRemoteRebuildBaselineState', () => {
     const baseline = buildRemoteRebuildBaselineState(
       { globalConfig: { appFeatures: snapshotAppFeatures } },
       localOnlySyncSettings,
+      NEW_INSTALL_APP_FEATURES,
     );
 
     expect(baseline.globalConfig.appFeatures).toEqual(snapshotAppFeatures);
@@ -55,6 +44,7 @@ describe('buildRemoteRebuildBaselineState', () => {
     const baseline = buildRemoteRebuildBaselineState(
       { globalConfig: { sync: { isCompressionEnabled: true } } },
       localOnlySyncSettings,
+      DEFAULT_GLOBAL_CONFIG.appFeatures,
     );
 
     expect(baseline.globalConfig.sync).toEqual({
